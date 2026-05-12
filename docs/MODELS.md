@@ -14,7 +14,8 @@ defrag-OOM and similar transient failures.
 | `30b-a3b` | `Qwen/Qwen3-VL-30B-A3B-Thinking-FP8` | 1 | 0 | 8002 | 32768 | vllm-0.17.1 ptfork | MoE, 3B active params |
 | `8b-thinking` | `Qwen/Qwen3-VL-8B-Thinking-FP8` | 1 | 0 | 8003 | 32768 | vllm-0.17.1 ptfork | small / fast iteration |
 | `gemma4-31b` | `RedHatAI/gemma-4-31b-it-FP8-Dynamic` | 1 | 2 | 8004 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | Anthropic /v1/messages, see [GEMMA4.md](GEMMA4.md) |
-| `gpt-oss-120b` | `unsloth/gpt-oss-120b-BF16` | 4 | 3,4,5,6 | 8005 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | OpenAI MoE BF16 unquantized (240 GB), Harmony + gptoss reasoning. See [GPT-OSS.md](GPT-OSS.md) |
+| `gpt-oss-120b` | `unsloth/gpt-oss-120b-BF16` | 4 | 3,4,5,6 | 8005 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | ⚠️ Loads but incoherent output — see [GPT-OSS.md](GPT-OSS.md) |
+| `minimax-m2` | `MiniMaxAI/MiniMax-M2` | 4 | 4,5,6,7 | 8006 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | 230B MoE FP8, Anthropic /v1/messages + 4-tool parallel verified, see [MINIMAX.md](MINIMAX.md) |
 | `235b-tp4` | `Qwen/Qwen3-VL-235B-A22B-Thinking-FP8` | 4 | 4,5,6,7 | 8004 | 8192 | vllm-0.17.1 ptfork | 235B MoE on 4 cards. **Port conflicts with `gemma4-31b`** — only one at a time. |
 | `235b-tp8` | `Qwen/Qwen3-VL-235B-A22B-Thinking-FP8` | 8 | 0..7 | 8006 | 32768 | vllm-0.17.1 ptfork | maximum context on 8 cards |
 
@@ -29,6 +30,17 @@ defrag-OOM and similar transient failures.
 - **Flag (thinking variants only):** `--reasoning-parser qwen3` (extracts `<think>…</think>` into the `reasoning_content` field)
 - **Throughput:** ~49 tok/s on 32B-Thinking, FP8, single Gaudi 3, 1 user
 - **Caveat:** `--enforce-eager` is NOT needed on 0.17.1 ptfork (the older 0.17.1-ptupstream image had a graph capture bug; ptfork fixes it)
+
+### MiniMax M2 FP8 (`MiniMaxAI/MiniMax-M2`)
+
+- **Image:** `gaudi-vllm-gemma4:0.19.0` — reuses Gemma 4 patched image, no MiniMax-specific patches needed
+- See [MINIMAX.md](MINIMAX.md) for full launch + smoke-test walkthrough
+- **Architecture:** `MiniMaxM2ForCausalLM` — vllm-gaudi ships handcrafted `HpuMiniMaxM2ForCausalLM` (overrides upstream registration at import time)
+- **FP8 kernel:** `HPUChannelWiseTorchFP8ScaledMMLinearKernel` selected automatically
+- **TP=4** on Gaudis 4-7; ~107 GB/card steady-state
+- **Flags:** `--tool-call-parser minimax_m2 --reasoning-parser minimax_m2`
+- **Verified:** `/v1/messages` reasoning + text blocks, parallel tool calls × 4 different tools (weather/flights/exchange/hotel)
+- **Disk:** ~215 GB (130 FP8 safetensors shards from MiniMaxAI directly)
 
 ### gpt-oss-120b BF16 (`unsloth/gpt-oss-120b-BF16`)
 

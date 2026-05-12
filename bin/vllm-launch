@@ -32,6 +32,10 @@ declare -A PRESETS=(
   # Reuses the Gemma 4 patched image — the UniformTypeKVCacheSpecs unwrap path
   # handles gpt-oss's hetero-attention layers too.
   [gpt-oss-120b]="unsloth/gpt-oss-120b-BF16|4|3,4,5,6|8005|16384|gaudi-vllm-gemma4:0.19.0"
+  # MiniMax M2 (FP8, 230B MoE, ~10B active) — vllm-gaudi ships handcrafted
+  # HpuMiniMaxM2ForCausalLM class. TP=4 on Gaudis 4-7, port 8006.
+  # ~215 GB on disk; ~107 GB/card steady-state HBM.
+  [minimax-m2]="MiniMaxAI/MiniMax-M2|4|4,5,6,7|8006|16384|gaudi-vllm-gemma4:0.19.0"
 )
 
 # colors
@@ -79,6 +83,13 @@ start() {
     REASONING_FLAGS="--reasoning-parser openai_gptoss"
     SERVED_NAME="gpt-oss-120b"
     SKIP_TOOL_CHOICE=1
+  fi
+  # MiniMax M2 — vllm-gaudi has a handcrafted HpuMiniMaxM2ForCausalLM class.
+  # Uses minimax_m2 tool + reasoning parsers (both registered in vLLM 0.19).
+  if [[ "$preset" == "minimax-m2" || "$preset" == minimax-m2* ]]; then
+    TOOL_PARSER="minimax_m2"
+    REASONING_FLAGS="--reasoning-parser minimax_m2"
+    SERVED_NAME="$preset"
   fi
 
   # 235B-A22B-FP8 has chronic HBM fragmentation under sustained inference.
