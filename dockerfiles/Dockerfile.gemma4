@@ -1,0 +1,54 @@
+# Derived from Habana's vllm-0.19.0 image; bumps transformers to 5.7+ for Gemma 4 support.
+# vLLM 0.19.0 ships with transformers <5; Gemma4ForConditionalGeneration needs >=5.5.0.
+FROM vault.habana.ai/gaudi-docker/1.24.0/ubuntu24.04/habanalabs/vllm-0.19.0-ptfork-2.10.0:1.24.0-1007
+
+# Force-upgrade the bits Gemma 4 needs.
+# --no-deps on transformers prevents pip from re-resolving the entire ML stack.
+RUN pip install --no-cache-dir --no-deps --upgrade transformers==5.7.0 \
+ && pip install --no-cache-dir --upgrade \
+        "tokenizers>=0.22.0" \
+        "compressed-tensors>=0.12.0" \
+        "accelerate>=1.10.0" \
+        "Pillow>=11.0.0"
+
+ENV VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1
+
+# Patch 1 — head_size: Gemma 4's two attention types have head_dim 256 (local)
+# and 512 (global). vllm-gaudi 0.19.0's HPUPagedAttention only allows 1..256.
+RUN sed -i 's|return list(range(1, 257))|return list(range(1, 257)) + [320, 384, 448, 512]|' \
+        /usr/local/lib/python3.12/dist-packages/vllm_gaudi/attention/ops/hpu_paged_attn.py \
+ && python3 -c "from vllm_gaudi.attention.ops.hpu_paged_attn import HPUPagedAttention; \
+                assert 512 in HPUPagedAttention.get_supported_head_sizes(); \
+                print('OK patch 1 — head sizes 320/384/448/512 supported')"
+
+# Patch 2 — KV cache divisibility: Gemma 4's two kv_cache_groups have different
+# page_size_bytes. The non-hybrid path allocates one tensor per kv_cache_tensor
+# and asserts strict divisibility. When a tensor sized for one group's page is
+# served to another group, the assert fails. Replace it with floor-division
+# (the unused tail bytes are never read).
+COPY patch_kv_divisibility.py /tmp/patch_kv_divisibility.py
+RUN python3 /tmp/patch_kv_divisibility.py \
+ && python3 -c "import vllm_gaudi.v1.worker.hpu_model_runner as m, inspect; \
+                src = inspect.getsource(m); \
+                assert 'GEMMA4_TRIM_OK' in src, 'patch 2 marker missing'; \
+                print('OK patch 2 — KV divisibility relaxed for heterogeneous head_dim')"
+
+# Patch 3 — flip skip_special_tokens default to False so the gemma4 reasoning
+# parser can see the <|channel> / <channel|> markers it expects. vLLM 0.19's
+# default of True strips them before extract_reasoning() runs, causing the
+# reasoning channel to silently fall through into content. Affects all four
+# request shapes (SamplingParams + chat_completion + completion + responses).
+# Anthropic /v1/messages has no field default; it inherits from SamplingParams.
+RUN sed -i 's|skip_special_tokens: bool = True|skip_special_tokens: bool = False|g' \
+        /usr/local/lib/python3.12/dist-packages/vllm/sampling_params.py \
+        /usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/chat_completion/protocol.py \
+        /usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/completion/protocol.py \
+        /usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/responses/protocol.py \
+ && python3 -c "from vllm.sampling_params import SamplingParams; \
+                from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest; \
+                assert SamplingParams().skip_special_tokens is False, 'SamplingParams default not flipped'; \
+                req = ChatCompletionRequest(model='x', messages=[{'role':'user','content':'hi'}]); \
+                assert req.skip_special_tokens is False, 'ChatCompletionRequest default not flipped'; \
+                print('OK patch 3 — skip_special_tokens default flipped to False')"
+
+WORKDIR /root/scripts

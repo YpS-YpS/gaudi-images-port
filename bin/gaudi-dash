@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# gaudi-dash — multi-pane dashboard for this Gaudi3 box.
-# Layout:
-#   ┌─────────────┬─────────────────┐
-#   │   btop      │                 │
-#   ├─────────────┤   hl-smi -l 1   │
-#   │   htop      │                 │
-#   └─────────────┴─────────────────┘
+# gaudi-dash — fancy multi-pane dashboard for this Gaudi3 box.
+# Layout (top = the showpiece, btop-style live AIP monitor):
+#   ┌─────────────────────────────────────────────┐
+#   │             hl-top  (8× HL-325)             │
+#   ├──────────────────────┬──────────────────────┤
+#   │        btop          │        htop          │
+#   └──────────────────────┴──────────────────────┘
 # Usage:
 #   gaudi-dash         # create or attach to the dashboard
 #   gaudi-dash kill    # tear it down
@@ -19,6 +19,8 @@
 
 set -eu
 SESSION=gaudi-dash
+HERE="$(cd "$(dirname "$0")" && pwd)"
+HL_TOP="${HERE}/hl-top"
 
 case "${1:-}" in
   kill|stop|down)
@@ -31,10 +33,23 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exec tmux attach -t "$SESSION"
 fi
 
-# Launch each tool directly as the pane's command (no shell wrapping → no send-keys race).
-tmux new-session  -d -s "$SESSION" -x 200 -y 50 'btop'
-tmux split-window -h -l 55% -t "$SESSION:0" 'hl-smi -l 1'
-tmux split-window -v -l 50% -t "$SESSION:0.0" 'htop'
+# Pane 0 (top, full width): hl-top — the fancy AIP monitor.
+tmux new-session -d -s "$SESSION" -x 220 -y 60 "$HL_TOP"
+
+# Pane 1 (bottom-left): btop. Split off the bottom 45% of pane 0.
+tmux split-window -v -l 45% -t "$SESSION:0.0" 'btop'
+
+# Pane 2 (bottom-right): htop. Split the bottom pane horizontally.
+tmux split-window -h -l 50% -t "$SESSION:0.1" 'htop'
+
+# Subtle styling for the tmux status bar so the chrome matches the panels.
+# These are global options so they take no target; failures are non-fatal.
+tmux set -g status-style "bg=#1a1d24,fg=#8a93a6" 2>/dev/null || true
+tmux set -g status-left  " #[fg=#a8d0ff,bold]gaudi-dash#[default] #[fg=#5a637a]│#[default] " 2>/dev/null || true
+tmux set -g status-right "#[fg=#5a637a]│ #[fg=#8a93a6]%H:%M:%S " 2>/dev/null || true
+tmux set -g status-left-length 40 2>/dev/null || true
+tmux set -g pane-border-style "fg=#3a4150" 2>/dev/null || true
+tmux set -g pane-active-border-style "fg=#5a8ec9" 2>/dev/null || true
 
 tmux select-pane -t "$SESSION:0.0"
 exec tmux attach -t "$SESSION"

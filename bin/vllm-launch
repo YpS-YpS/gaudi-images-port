@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# vllm-launch.sh — launch a Qwen3-VL preset on Gaudi via vLLM.
+#
+# Usage:
+#   ./vllm-launch.sh <preset>          # start preset
+#   ./vllm-launch.sh list              # list presets + ports
+#   ./vllm-launch.sh stop <preset>     # stop one
+#   ./vllm-launch.sh stop-all          # stop all vllm-* containers
+#   ./vllm-launch.sh logs <preset>     # follow logs
+#
+# Presets are defined below. Each gets a unique container name + port + Gaudi
+# selection so multiple can run side-by-side without conflict.
+set -euo pipefail
+
+DEFAULT_IMAGE='vault.habana.ai/gaudi-docker/1.24.0/ubuntu24.04/habanalabs/vllm-0.17.1-ptfork-2.10.0:1.24.0-1007'
+IMAGE_0_19='vault.habana.ai/gaudi-docker/1.24.0/ubuntu24.04/habanalabs/vllm-0.19.0-ptfork-2.10.0:1.24.0-1007'
+HF_CACHE=/home/satyajit-gaudi/hf-cache
+
+# preset|model|TP|devices|port|max-len[|image]   image is optional, defaults to vLLM 0.17.1
+declare -A PRESETS=(
+  [32b-thinking]="Qwen/Qwen3-VL-32B-Thinking-FP8|1|0|8000|16384"
+  [32b-instruct]="Qwen/Qwen3-VL-32B-Instruct-FP8|1|1|8001|16384"
+  [30b-a3b]="Qwen/Qwen3-VL-30B-A3B-Thinking-FP8|1|0|8002|32768"
+  [8b-thinking]="Qwen/Qwen3-VL-8B-Thinking-FP8|1|0|8003|32768"
+  [235b-tp4]="Qwen/Qwen3-VL-235B-A22B-Thinking-FP8|4|4,5,6,7|8004|8192"
+  [235b-tp8]="Qwen/Qwen3-VL-235B-A22B-Thinking-FP8|8|0,1,2,3,4,5,6,7|8006|32768"
+  # Gemma 4 31B Instruct FP8 — uses derived image (vllm 0.19 + transformers 5.7).
+  # Build with:  cd dockerfiles && docker build -t gaudi-vllm-gemma4:0.19.0 -f Dockerfile.gemma4 .
+  [gemma4-31b]="RedHatAI/gemma-4-31b-it-FP8-Dynamic|1|2|8004|16384|gaudi-vllm-gemma4:0.19.0"
+)
+
+# colors
+G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
+
+list() {
+  printf "${B}preset            model                                          TP  devices    port${N}\n"
+  for p in "${!PRESETS[@]}"; do
+    IFS='|' read -r model tp dev port maxlen <<<"${PRESETS[$p]}"
+    printf "%-17s %-46s  %s  %-9s  %s\n" "$p" "$model" "$tp" "$dev" "$port"
+  done | sort
+}
+
+start() {
+  local preset=$1
+  [[ -z "${PRESETS[$preset]:-}" ]] && { echo "${R}unknown preset:${N} $preset"; list; exit 1; }
+  IFS='|' read -r MODEL TP DEVICES PORT MAXLEN PRESET_IMAGE <<<"${PRESETS[$preset]}"
+  local CONTAINER="vllm-$preset"
+  local IMAGE="${PRESET_IMAGE:-$DEFAULT_IMAGE}"
+
+  # Thinking variants: parse <think>...</think> server-side so the OpenAI-compat
+  # response has a separate reasoning_content field. Open WebUI then renders it
+  # as a collapsible "Thinking" block instead of inline-mixed with the answer.
+  local REASONING_FLAGS=""
+  if [[ "$preset" == *thinking* || "$preset" == 235b-tp* ]]; then
+    REASONING_FLAGS="--reasoning-parser qwen3"
+  fi
+
+  # gemma4 needs its own tool-call + reasoning parsers (channel markers leak
+  # via hermes; vLLM #39043). Served name diverges from the qwen3-vl-* default.
+  local TOOL_PARSER="hermes"
+  local SERVED_NAME="qwen3-vl-$preset"
+  local EXTRA_VLLM_FLAGS=""
+  if [[ "$preset" == "gemma4-31b" ]]; then
+    TOOL_PARSER="gemma4"
+    REASONING_FLAGS="--reasoning-parser gemma4"
+    SERVED_NAME="gemma4-31b"
+    EXTRA_VLLM_FLAGS="--default-chat-template-kwargs '{\"enable_thinking\":true}'"
+  fi
+
+  # 235B-A22B-FP8 has chronic HBM fragmentation under sustained inference.
+  # Lower util gives the defragmenter more headroom; bigger LRU reduces
+  # recipe-cache eviction churn that contributes to fragmentation.
+  local GPU_UTIL=0.9
+  local EXTRA_ENV=""
+  # Auto-recover from PT_DEVMEM defrag-OOM (chronic on vllm-gaudi 0.17.1
+  # for FP8 models under sustained inference). Default for ALL presets now.
+  local RESTART_POLICY=unless-stopped
+  if [[ "$preset" == 235b-tp* ]]; then
+    GPU_UTIL=0.80
+    EXTRA_ENV="-e HABANA_PGM_LRU_MAX=60000"
+  fi
+
+  echo -e "${B}preset:${N}   $preset"
+  echo -e "${B}model:${N}    $MODEL"
+  echo -e "${B}TP:${N}       $TP   ${B}devices:${N} $DEVICES   ${B}port:${N} $PORT   ${B}max-len:${N} $MAXLEN"
+
+  docker rm -f "$CONTAINER" 2>/dev/null || true
+
+  docker run -d \
+    --name "$CONTAINER" \
+    --runtime=habana \
+    --restart "$RESTART_POLICY" \
+    --entrypoint /bin/bash \
+    -e HABANA_VISIBLE_DEVICES="$DEVICES" \
+    -e OMPI_MCA_btl_vader_single_copy_mechanism=none \
+    -e PT_HPU_LAZY_MODE=1 \
+    -e PT_HPUGRAPH_DISABLE_TENSOR_CACHE=false \
+    -e PT_HPU_ENABLE_LAZY_COLLECTIVES=true \
+    -e PT_HPU_WEIGHT_SHARING=0 \
+    -e VLLM_GRAPH_RESERVED_MEM=0.3 \
+    -e VLLM_SKIP_WARMUP=true \
+    -e VLLM_ENGINE_ITERATION_TIMEOUT_S=600 \
+    -e VLLM_RPC_TIMEOUT=600000 \
+    $EXTRA_ENV \
+    -e HF_HOME=/root/.cache/huggingface \
+    -e HTTP_PROXY=http://proxy-dmz.intel.com:912 \
+    -e HTTPS_PROXY=http://proxy-dmz.intel.com:912 \
+    -e NO_PROXY='localhost,127.0.0.1,::1,.intel.com,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,host.docker.internal' \
+    --cap-add=sys_nice \
+    --net=host \
+    --ipc=host \
+    -v "$HF_CACHE:/root/.cache/huggingface" \
+    "$IMAGE" \
+    -lc "exec vllm serve '$MODEL' \
+          --tensor-parallel-size $TP \
+          --host 0.0.0.0 \
+          --port $PORT \
+          --enable-auto-tool-choice \
+          --tool-call-parser $TOOL_PARSER \
+          $REASONING_FLAGS \
+          $EXTRA_VLLM_FLAGS \
+          --max-model-len $MAXLEN \
+          --gpu-memory-utilization $GPU_UTIL \
+          --max-num-seqs 32 \
+          --trust-remote-code \
+          --download-dir /root/.cache/huggingface \
+          --served-model-name $SERVED_NAME"
+
+  echo -e "${G}started:${N}  $CONTAINER"
+  echo -e "${B}API:${N}      http://10.234.184.59:$PORT/v1"
+  echo -e "${B}logs:${N}     $0 logs $preset"
+  echo -e "${B}stop:${N}     $0 stop $preset"
+  echo -e "${B}warmup:${N}   ~5-15 min on first launch (graph compile)"
+}
+
+stop() {
+  local preset=$1
+  docker rm -f "vllm-$preset" 2>/dev/null && echo "stopped: vllm-$preset" || echo "not running: vllm-$preset"
+}
+
+stop_all() {
+  local n=0
+  for c in $(docker ps -a --filter 'name=vllm-' --format '{{.Names}}'); do
+    docker rm -f "$c" >/dev/null && { echo "stopped: $c"; n=$((n+1)); }
+  done
+  echo "$n container(s) stopped"
+}
+
+logs() {
+  local preset=$1
+  exec docker logs -f --tail 200 "vllm-$preset"
+}
+
+case "${1:-list}" in
+  list|ls|"")              list ;;
+  stop)                    stop "${2:?need preset}" ;;
+  stop-all)                stop_all ;;
+  logs)                    logs "${2:?need preset}" ;;
+  *)                       start "$1" ;;
+esac

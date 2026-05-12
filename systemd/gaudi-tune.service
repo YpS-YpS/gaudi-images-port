@@ -1,0 +1,15 @@
+[Unit]
+Description=Gaudi performance tuning + scale-out NIC bring-up (per Habana docs)
+After=multi-user.target
+ConditionVirtualization=!container
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/sbin/modprobe msr
+ExecStart=/usr/sbin/wrmsr -a 0x1b0 0x0
+ExecStart=/usr/sbin/wrmsr -a 0x774 0x2708
+ExecStart=/bin/bash -c '/opt/habanalabs/qual/gaudi3/bin/manage_network_ifs.sh --up || true'
+
+[Install]
+WantedBy=multi-user.target

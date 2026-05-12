@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""hl-top — btop-style live monitor for Habana Gaudi AIPs.
+
+Polls `hl-smi` in CSV mode and renders rounded panels with gradient bars,
+sparklines, and an aggregate header. Uses the alternate screen buffer so it
+restores the terminal cleanly on exit (Ctrl-C or q).
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from collections import deque
+from dataclasses import dataclass
+
+REFRESH_SEC = 1.0
+SPARK_LEN = 24
+HISTORY = 60
+
+QUERY_FIELDS = [
+    "index", "name", "temperature.aip",
+    "utilization.aip", "utilization.memory",
+    "memory.used", "memory.total",
+    "power.draw", "power.max",
+    "clocks.current.soc",
+]
+
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+BAR_FULL = "█"
+BAR_EMPTY = "░"
+
+# ANSI helpers
+ESC = "\x1b"
+CSI = ESC + "["
+ALT_ON = CSI + "?1049h"
+ALT_OFF = CSI + "?1049l"
+CURSOR_HIDE = CSI + "?25l"
+CURSOR_SHOW = CSI + "?25h"
+CLEAR = CSI + "2J"
+HOME = CSI + "H"
+RESET = CSI + "0m"
+BOLD = CSI + "1m"
+DIM = CSI + "2m"
+
+
+def fg(r: int, g: int, b: int) -> str:
+    return f"{CSI}38;2;{r};{g};{b}m"
+
+
+def bg(r: int, g: int, b: int) -> str:
+    return f"{CSI}48;2;{r};{g};{b}m"
+
+
+# Palette — btop-ish
+C_FRAME = fg(80, 90, 110)
+C_TITLE = BOLD + fg(180, 200, 240)
+C_LABEL = fg(140, 150, 170)
+C_VALUE = fg(220, 220, 230)
+C_DIM = fg(110, 115, 130)
+C_ACCENT = fg(120, 200, 255)
+C_OK = fg(120, 220, 130)
+C_WARN = fg(240, 200, 100)
+C_HOT = fg(240, 110, 110)
+
+
+def gradient(pct: float) -> str:
+    """Green → yellow → red for a 0..100 percent."""
+    pct = max(0.0, min(100.0, pct))
+    if pct < 50:
+        # green → yellow
+        t = pct / 50.0
+        r = int(80 + (240 - 80) * t)
+        g = int(220 - (220 - 200) * t)
+        b = int(130 - (130 - 80) * t)
+    else:
+        # yellow → red
+        t = (pct - 50) / 50.0
+        r = int(240 + (240 - 240) * t)
+        g = int(200 - (200 - 80) * t)
+        b = int(80 - (80 - 80) * t)
+    return fg(r, g, b)
+
+
+def temp_color(c: float) -> str:
+    if c < 45:
+        return C_OK
+    if c < 65:
+        return C_WARN
+    return C_HOT
+
+
+def bar(pct: float, width: int) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = int(round((pct / 100.0) * width))
+    empty = width - filled
+    color = gradient(pct)
+    return color + BAR_FULL * filled + C_DIM + BAR_EMPTY * empty + RESET
+
+
+def sparkline(values: deque, width: int) -> str:
+    if not values:
+        return " " * width
+    data = list(values)[-width:]
+    lo, hi = 0.0, max(max(data), 1.0)
+    out = []
+    for v in data:
+        idx = int((v - lo) / (hi - lo) * (len(SPARK_CHARS) - 1))
+        idx = max(0, min(len(SPARK_CHARS) - 1, idx))
+        out.append(SPARK_CHARS[idx])
+    s = "".join(out).rjust(width)
+    return gradient(values[-1]) + s + RESET
+
+
+@dataclass
+class AIP:
+    index: int
+    name: str
+    temp: float
+    util: float
+    mem_util: float
+    mem_used: float   # MiB
+    mem_total: float  # MiB
+    power: float
+    power_max: float
+    clock: float
+
+
+def query() -> list[AIP]:
+    cmd = [
+        "hl-smi",
+        "-Q", ",".join(QUERY_FIELDS),
+        "-f", "csv,noheader,nounits",
+    ]
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=3)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    aips: list[AIP] = []
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < len(QUERY_FIELDS):
+            continue
+        try:
+            aips.append(AIP(
+                index=int(parts[0]),
+                name=parts[1],
+                temp=float(parts[2]),
+                util=float(parts[3]),
+                mem_util=float(parts[4]),
+                mem_used=float(parts[5]),
+                mem_total=float(parts[6]),
+                power=float(parts[7]),
+                power_max=float(parts[8]),
+                clock=float(parts[9]),
+            ))
+        except ValueError:
+            continue
+    return aips
+
+
+# Rounded box drawing
+TL, TR, BL, BR, H, V = "╭", "╮", "╰", "╯", "─", "│"
+
+
+def render_card(a: AIP, width: int, hist: deque) -> list[str]:
+    """Return a list of strings (lines), each visually `width` cols wide."""
+    inner = width - 2  # interior width
+
+    # Title line: ╭─ AIP n ─── name ─── clock ─╮
+    left = f" AIP {a.index} "
+    right = f" {a.name}  {int(a.clock)}MHz "
+    pad = inner - len(left) - len(right) - 2  # 2 dashes around
+    if pad < 1:
+        pad = 1
+    title = (
+        C_FRAME + TL + H + C_TITLE + left + C_FRAME + H * pad + C_DIM + right + C_FRAME + H + TR + RESET
+    )
+
+    # Row layout: V " " label(5) " " bar " " value(9) " " V  → fixed = 20
+    bar_w = max(4, inner - 20)
+
+    def row(label: str, pct: float, value: str) -> str:
+        lbl = C_LABEL + f"{label:<5}" + RESET
+        b = bar(pct, bar_w)
+        val = C_VALUE + f"{value:>9}" + RESET
+        return C_FRAME + V + " " + lbl + " " + b + " " + val + " " + C_FRAME + V + RESET
+
+    util_row = row("Util", a.util, f"{a.util:5.1f}%")
+    mem_pct = (a.mem_used / a.mem_total * 100.0) if a.mem_total else 0.0
+    mem_row = row("Mem", mem_pct, f"{a.mem_used/1024:4.1f}/{a.mem_total/1024:.0f}G")
+    pwr_pct = (a.power / a.power_max * 100.0) if a.power_max else 0.0
+    pwr_row = row("Pwr", pwr_pct, f"{int(a.power):>3}/{int(a.power_max)}W")
+
+    # Stats line: V " " "Temp " <temp:4> "  " "util " <spark> " " V → fixed = 20
+    spark_w = max(4, inner - 20)
+    spark = sparkline(hist, spark_w)
+    temp_str = temp_color(a.temp) + f"{int(a.temp):>2}°C" + RESET
+    stats = (
+        C_FRAME + V + " " + C_LABEL + "Temp " + temp_str
+        + "  " + C_DIM + "util " + RESET + spark + " " + C_FRAME + V + RESET
+    )
+
+    bottom = C_FRAME + BL + H * inner + BR + RESET
+
+    return [title, util_row, mem_row, pwr_row, stats, bottom]
+
+
+def render_header(aips: list[AIP], width: int) -> list[str]:
+    if not aips:
+        title = " GAUDI3  —  no AIPs detected "
+        return [
+            C_FRAME + TL + H * (width - 2) + TR + RESET,
+            C_FRAME + V + C_HOT + title.center(width - 2) + C_FRAME + V + RESET,
+            C_FRAME + BL + H * (width - 2) + BR + RESET,
+        ]
+    n = len(aips)
+    total_pwr = sum(a.power for a in aips)
+    total_pwr_max = sum(a.power_max for a in aips)
+    avg_util = sum(a.util for a in aips) / n
+    avg_temp = sum(a.temp for a in aips) / n
+    hot = max(a.temp for a in aips)
+    used = sum(a.mem_used for a in aips) / 1024
+    total_mem = sum(a.mem_total for a in aips) / 1024
+    name = aips[0].name
+    ts = time.strftime("%H:%M:%S")
+
+    left = f" {BOLD}GAUDI3{RESET}{C_TITLE}  {n}× {name} {RESET}"
+    mid = (
+        f"{C_LABEL}util {RESET}{gradient(avg_util)}{avg_util:5.1f}%{RESET}  "
+        f"{C_LABEL}mem {RESET}{C_VALUE}{used:5.1f}/{total_mem:.0f}G{RESET}  "
+        f"{C_LABEL}pwr {RESET}{gradient(total_pwr/total_pwr_max*100 if total_pwr_max else 0)}"
+        f"{int(total_pwr)}W{RESET}{C_DIM}/{int(total_pwr_max)}W{RESET}  "
+        f"{C_LABEL}temp{RESET} avg {temp_color(avg_temp)}{int(avg_temp)}°{RESET} "
+        f"hot {temp_color(hot)}{int(hot)}°{RESET}"
+    )
+    right = f"{C_DIM}{ts}{RESET} "
+
+    # Visible-length helpers (strip ANSI for centering math)
+    def vis(s: str) -> int:
+        out = 0
+        i = 0
+        while i < len(s):
+            if s[i] == "\x1b":
+                while i < len(s) and s[i] != "m":
+                    i += 1
+                i += 1
+            else:
+                out += 1
+                i += 1
+        return out
+
+    inner_w = width - 2
+    used_w = vis(left) + vis(mid) + vis(right)
+    gap = inner_w - used_w
+    if gap < 2:
+        gap = 2
+    g1 = gap // 2
+    g2 = gap - g1
+    line = C_FRAME + V + left + " " * g1 + mid + " " * g2 + right + C_FRAME + V + RESET
+
+    return [
+        C_FRAME + TL + H * inner_w + TR + RESET,
+        line,
+        C_FRAME + BL + H * inner_w + BR + RESET,
+    ]
+
+
+def render_footer(width: int) -> str:
+    msg = f"{C_DIM} q{RESET}{C_LABEL} quit  {C_DIM}refresh {REFRESH_SEC:.1f}s {RESET}"
+    # right-align inside width
+    def vis(s: str) -> int:
+        out, i = 0, 0
+        while i < len(s):
+            if s[i] == "\x1b":
+                while i < len(s) and s[i] != "m":
+                    i += 1
+                i += 1
+            else:
+                out += 1
+                i += 1
+        return out
+    pad = max(0, width - vis(msg))
+    return " " * pad + msg
+
+
+class NonBlockingInput:
+    """Put stdin into cbreak (no canonical/echo) and poll with select.
+
+    We deliberately do NOT set O_NONBLOCK on the fd — stdin/stdout share the
+    same TTY fd, so the flag would also break stdout writes.
+    """
+    def __enter__(self):
+        import termios
+        self.fd = sys.stdin.fileno()
+        try:
+            self.old = termios.tcgetattr(self.fd)
+        except termios.error:
+            self.old = None
+            return self
+        new = termios.tcgetattr(self.fd)
+        new[3] = new[3] & ~(termios.ICANON | termios.ECHO)
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, new)
+        return self
+
+    def wait_for_key(self, timeout: float) -> str:
+        import select
+        if self.old is None or timeout <= 0:
+            return ""
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        if not r:
+            return ""
+        try:
+            return os.read(self.fd, 64).decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def __exit__(self, *exc):
+        import termios
+        if self.old is not None:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+            except Exception:
+                pass
+
+
+def cleanup():
+    sys.stdout.write(CURSOR_SHOW + ALT_OFF + RESET)
+    sys.stdout.flush()
+
+
+def main() -> int:
+    histories: dict[int, deque] = {}
+
+    sys.stdout.write(ALT_ON + CURSOR_HIDE + CLEAR)
+    sys.stdout.flush()
+
+    def on_signal(signum, frame):
+        cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    try:
+        with NonBlockingInput() as kb:
+            while True:
+                cols, rows = shutil.get_terminal_size((100, 40))
+                aips = query()
+                for a in aips:
+                    h = histories.setdefault(a.index, deque(maxlen=HISTORY))
+                    h.append(a.util)
+
+                # Layout: header (3 rows) + grid of cards (6 rows each) + footer
+                buf = [HOME]
+                header_lines = render_header(aips, cols)
+                buf.extend(line + CSI + "K\n" for line in header_lines)
+
+                if aips:
+                    # Choose columns based on terminal width
+                    if cols >= 130:
+                        ncols = 2
+                    elif cols >= 70:
+                        ncols = 2 if len(aips) > 4 else 1
+                    else:
+                        ncols = 1
+                    # min card width
+                    min_card = 50
+                    while ncols > 1 and cols // ncols < min_card:
+                        ncols -= 1
+
+                    card_w = cols // ncols
+                    # adjust last column to consume remainder
+                    widths = [card_w] * ncols
+                    widths[-1] += cols - card_w * ncols
+
+                    rows_used = len(header_lines)
+                    # 6 lines per card
+                    nrows_grid = (len(aips) + ncols - 1) // ncols
+                    for r_idx in range(nrows_grid):
+                        cards: list[list[str]] = []
+                        for c_idx in range(ncols):
+                            i = r_idx * ncols + c_idx
+                            if i >= len(aips):
+                                cards.append([" " * widths[c_idx]] * 6)
+                                continue
+                            cards.append(render_card(aips[i], widths[c_idx], histories[aips[i].index]))
+                        for ln in range(6):
+                            line = "".join(cards[c][ln] for c in range(ncols))
+                            buf.append(line + CSI + "K\n")
+                            rows_used += 1
+
+                    # pad remaining rows then footer
+                    pad_rows = max(0, rows - rows_used - 1)
+                    for _ in range(pad_rows):
+                        buf.append(CSI + "K\n")
+                    buf.append(render_footer(cols) + CSI + "K")
+                else:
+                    buf.append("\n  hl-smi returned no data — is the driver loaded?" + CSI + "K\n")
+
+                sys.stdout.write("".join(buf))
+                sys.stdout.flush()
+
+                # wait for refresh, but break early on key
+                deadline = time.monotonic() + REFRESH_SEC
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    keys = kb.wait_for_key(min(0.25, remaining))
+                    if keys and ("q" in keys or "Q" in keys or "\x03" in keys):
+                        return 0
+    finally:
+        cleanup()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
