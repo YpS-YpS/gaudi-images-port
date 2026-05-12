@@ -173,7 +173,6 @@ single tool call → parallel tools × 4 cities → parallel mixed × 4 differen
 
 ## Caveats
 
-- The corporate-proxy drop-in is hardcoded to `http://proxy-dmz.intel.com:912`. Drop the file or edit the constant on non-Intel boxes.
 - `install.sh` modifies `/etc/`, GRUB, kernel modules, MSRs, hugepages. Read it before running on a box you care about.
 - Gemma 4 base image is gated behind Habana's `vault.habana.ai` registry — `docker login vault.habana.ai` may be required (see `docs/REQUIREMENTS.md`).
 - 235B-A22B has chronic HBM fragmentation under sustained inference. Preset uses `--gpu-memory-utilization 0.80` + `--restart unless-stopped` to recover.
