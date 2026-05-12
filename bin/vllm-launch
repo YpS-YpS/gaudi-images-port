@@ -27,6 +27,11 @@ declare -A PRESETS=(
   # Gemma 4 31B Instruct FP8 — uses derived image (vllm 0.19 + transformers 5.7).
   # Build with:  cd dockerfiles && docker build -t gaudi-vllm-gemma4:0.19.0 -f Dockerfile.gemma4 .
   [gemma4-31b]="RedHatAI/gemma-4-31b-it-FP8-Dynamic|1|2|8004|16384|gaudi-vllm-gemma4:0.19.0"
+  # gpt-oss-120b BF16 unquantized (MoE, 120B total, 5B active, alternating sliding+full attn).
+  # ~240 GB on disk; TP=4 on Gaudis 3-6 (60 GB weights/card, leaves ~48 GB for KV+graphs).
+  # Reuses the Gemma 4 patched image — the UniformTypeKVCacheSpecs unwrap path
+  # handles gpt-oss's hetero-attention layers too.
+  [gpt-oss-120b]="unsloth/gpt-oss-120b-BF16|4|3,4,5,6|8005|16384|gaudi-vllm-gemma4:0.19.0"
 )
 
 # colors
@@ -65,6 +70,15 @@ start() {
     REASONING_FLAGS="--reasoning-parser gemma4"
     SERVED_NAME="gemma4-31b"
     EXTRA_VLLM_FLAGS="--default-chat-template-kwargs '{\"enable_thinking\":true}'"
+  fi
+  # gpt-oss-120b — Harmony response format. Tools are parsed via Harmony (channel
+  # markers + Responses API), not a tool_parser plugin. So we skip --tool-call-parser.
+  # Reasoning parser name is "openai_gptoss" (the registered key in vLLM 0.19).
+  local SKIP_TOOL_CHOICE=0
+  if [[ "$preset" == "gpt-oss-120b" ]]; then
+    REASONING_FLAGS="--reasoning-parser openai_gptoss"
+    SERVED_NAME="gpt-oss-120b"
+    SKIP_TOOL_CHOICE=1
   fi
 
   # 235B-A22B-FP8 has chronic HBM fragmentation under sustained inference.
@@ -115,8 +129,7 @@ start() {
           --tensor-parallel-size $TP \
           --host 0.0.0.0 \
           --port $PORT \
-          --enable-auto-tool-choice \
-          --tool-call-parser $TOOL_PARSER \
+          $( ((SKIP_TOOL_CHOICE)) || echo '--enable-auto-tool-choice --tool-call-parser '$TOOL_PARSER ) \
           $REASONING_FLAGS \
           $EXTRA_VLLM_FLAGS \
           --max-model-len $MAXLEN \

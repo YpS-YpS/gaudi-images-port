@@ -14,6 +14,7 @@ defrag-OOM and similar transient failures.
 | `30b-a3b` | `Qwen/Qwen3-VL-30B-A3B-Thinking-FP8` | 1 | 0 | 8002 | 32768 | vllm-0.17.1 ptfork | MoE, 3B active params |
 | `8b-thinking` | `Qwen/Qwen3-VL-8B-Thinking-FP8` | 1 | 0 | 8003 | 32768 | vllm-0.17.1 ptfork | small / fast iteration |
 | `gemma4-31b` | `RedHatAI/gemma-4-31b-it-FP8-Dynamic` | 1 | 2 | 8004 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | Anthropic /v1/messages, see [GEMMA4.md](GEMMA4.md) |
+| `gpt-oss-120b` | `unsloth/gpt-oss-120b-BF16` | 4 | 3,4,5,6 | 8005 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | OpenAI MoE BF16 unquantized (240 GB), Harmony + gptoss reasoning. See [GPT-OSS.md](GPT-OSS.md) |
 | `235b-tp4` | `Qwen/Qwen3-VL-235B-A22B-Thinking-FP8` | 4 | 4,5,6,7 | 8004 | 8192 | vllm-0.17.1 ptfork | 235B MoE on 4 cards. **Port conflicts with `gemma4-31b`** — only one at a time. |
 | `235b-tp8` | `Qwen/Qwen3-VL-235B-A22B-Thinking-FP8` | 8 | 0..7 | 8006 | 32768 | vllm-0.17.1 ptfork | maximum context on 8 cards |
 
@@ -28,6 +29,17 @@ defrag-OOM and similar transient failures.
 - **Flag (thinking variants only):** `--reasoning-parser qwen3` (extracts `<think>…</think>` into the `reasoning_content` field)
 - **Throughput:** ~49 tok/s on 32B-Thinking, FP8, single Gaudi 3, 1 user
 - **Caveat:** `--enforce-eager` is NOT needed on 0.17.1 ptfork (the older 0.17.1-ptupstream image had a graph capture bug; ptfork fixes it)
+
+### gpt-oss-120b BF16 (`unsloth/gpt-oss-120b-BF16`)
+
+- **Image:** `gaudi-vllm-gemma4:0.19.0` — reuses the same 5-patch image as Gemma 4 (the wrapper-unwrap and skip_special_tokens patches cover gpt-oss too)
+- See [GPT-OSS.md](GPT-OSS.md) for the full deep-dive
+- **Architecture:** GptOssForCausalLM, native vLLM 0.19 — MoE with 128 experts, top-4 per token, 36 alternating sliding(128)/full attention layers
+- **TP=4** on Gaudis 3-6; ~60 GB weights/card + ~48 GB KV cache budget
+- **Flag:** `--reasoning-parser gptoss` (no tool-call-parser; Harmony handles tools)
+- **Endpoints:** `/v1/chat/completions` (Harmony output → `reasoning_content` + `content`) AND `/v1/responses` (canonical for tools)
+- **HBM:** ~115 GB / 128 GB per card — tight; lower `--gpu-memory-utilization` or fall back to TP=8 if defrag-OOM appears
+- **Disk:** ~240 GB (73 safetensors shards, unquantized BF16)
 
 ### Gemma 4 31B Instruct FP8 (`RedHatAI/gemma-4-31b-it-FP8-Dynamic`)
 
