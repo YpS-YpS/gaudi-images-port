@@ -64,7 +64,7 @@ scripts/smoke.sh http://localhost:8004 gemma4-31b
 |---|---|
 | **`docs/MODELS.md`** | List of all presets, ports, devices, flags, and per-model patches |
 | **`docs/GEMMA4.md`** | Deep-dive on the five patches required for Gemma 4 on vllm-gaudi 0.19 — what each does and why |
-| **`docs/MINIMAX.md`** | MiniMax M2 230B MoE FP8 — handcrafted HPU class, Anthropic shape + parallel tools verified |
+| **`docs/MINIMAX.md`** | MiniMax M2 + **M2.7** (230B MoE FP8) — handcrafted HPU class, Anthropic + parallel tools, M2.7's 256-expert/MTP quirks |
 | **`docs/GPT-OSS.md`** | gpt-oss 20b/120b failure analysis (MoE backend bug, documented for upstream fix) |
 | `docs/REQUIREMENTS.md` | Hardware / OS / BIOS / network checklist before running `bootstrap.sh` |
 | `docs/PLAYBOOK.md` | Day-1 walkthrough, day-2 ops (start/stop/swap models, multi-model parallel) |
@@ -140,7 +140,8 @@ See [`docs/MODELS.md`](docs/MODELS.md) for the full table. Short version:
 | `30b-a3b` | Qwen3-VL-30B-A3B-Thinking-FP8 | 8002 | Gaudi 0 | MoE, 3B active |
 | **`gemma4-31b`** | gemma-4-31b-it-FP8-Dynamic | 8004 | Gaudi 2 | Anthropic `/v1/messages`, 5 patches ([GEMMA4.md](docs/GEMMA4.md)) |
 | **`gpt-oss-120b`** | unsloth/gpt-oss-120b-BF16 | 8005 | Gaudi 3-6 (TP=4) | ⚠️ Loads but incoherent — see [GPT-OSS.md](docs/GPT-OSS.md) |
-| **`minimax-m2`** | MiniMaxAI/MiniMax-M2 | 8006 | Gaudi 4-7 (TP=4) | 230B MoE FP8, Anthropic + parallel tools verified ([MINIMAX.md](docs/MINIMAX.md)) |
+| **`minimax-m2`** | MiniMaxAI/MiniMax-M2 | 8006 | Gaudi 4-7 (TP=4) | 230B MoE FP8, 128 experts, Anthropic + parallel tools ([MINIMAX.md](docs/MINIMAX.md)) |
+| **`minimax-m2.7`** | MiniMaxAI/MiniMax-M2.7 | 8006 | Gaudi 4-7 (TP=4) | 229B MoE FP8, **256 experts + 3 MTP**, port-conflicts w/ `minimax-m2` ([MINIMAX.md](docs/MINIMAX.md#part-2--minimax-m27-apr-2026)) |
 | `235b-tp4` | Qwen3-VL-235B-A22B-Thinking-FP8 | 8004 | Gaudi 4-7 | 235B MoE on 4 cards (port-conflicts with `gemma4-31b`) |
 | `235b-tp8` | Qwen3-VL-235B-A22B-Thinking-FP8 | 8006 | Gaudi 0-7 | full TP=8 |
 

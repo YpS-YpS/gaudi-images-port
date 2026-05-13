@@ -36,6 +36,11 @@ declare -A PRESETS=(
   # HpuMiniMaxM2ForCausalLM class. TP=4 on Gaudis 4-7, port 8006.
   # ~215 GB on disk; ~107 GB/card steady-state HBM.
   [minimax-m2]="MiniMaxAI/MiniMax-M2|4|4,5,6,7|8006|16384|gaudi-vllm-gemma4:0.19.0"
+  # MiniMax M2.7 (FP8, 229B MoE, ~10B active) — Apr 2026 successor to M2.
+  # Same MiniMaxM2ForCausalLM arch (HPU override applies), but 256 experts (vs 128),
+  # top-8 routing (vs top-4), and 3 MTP (multi-token prediction) modules.
+  # ~230 GB on disk; expect ~115 GB/card. Same Gaudis 4-7 + port 8006 (swap with M2).
+  [minimax-m2.7]="MiniMaxAI/MiniMax-M2.7|4|4,5,6,7|8006|16384|gaudi-vllm-gemma4:0.19.0"
 )
 
 # colors
@@ -104,6 +109,14 @@ start() {
     GPU_UTIL=0.80
     EXTRA_ENV="-e HABANA_PGM_LRU_MAX=60000"
   fi
+  # MiniMax M2.7 is borderline on TP=4 (~115 GB/card forecast vs 128 GB HBM).
+  # Tighten util + cap seqs to leave defrag headroom; otherwise crash-on-warmup.
+  local MAX_NUM_SEQS=32
+  if [[ "$preset" == "minimax-m2.7" ]]; then
+    GPU_UTIL=0.85
+    MAX_NUM_SEQS=16
+    EXTRA_ENV="$EXTRA_ENV -e HABANA_PGM_LRU_MAX=60000"
+  fi
 
   echo -e "${B}preset:${N}   $preset"
   echo -e "${B}model:${N}    $MODEL"
@@ -145,7 +158,7 @@ start() {
           $EXTRA_VLLM_FLAGS \
           --max-model-len $MAXLEN \
           --gpu-memory-utilization $GPU_UTIL \
-          --max-num-seqs 32 \
+          --max-num-seqs $MAX_NUM_SEQS \
           --trust-remote-code \
           --download-dir /root/.cache/huggingface \
           --served-model-name $SERVED_NAME"

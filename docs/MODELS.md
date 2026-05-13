@@ -15,7 +15,8 @@ defrag-OOM and similar transient failures.
 | `8b-thinking` | `Qwen/Qwen3-VL-8B-Thinking-FP8` | 1 | 0 | 8003 | 32768 | vllm-0.17.1 ptfork | small / fast iteration |
 | `gemma4-31b` | `RedHatAI/gemma-4-31b-it-FP8-Dynamic` | 1 | 2 | 8004 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | Anthropic /v1/messages, see [GEMMA4.md](GEMMA4.md) |
 | `gpt-oss-120b` | `unsloth/gpt-oss-120b-BF16` | 4 | 3,4,5,6 | 8005 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | ⚠️ Loads but incoherent output — see [GPT-OSS.md](GPT-OSS.md) |
-| `minimax-m2` | `MiniMaxAI/MiniMax-M2` | 4 | 4,5,6,7 | 8006 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | 230B MoE FP8, Anthropic /v1/messages + 4-tool parallel verified, see [MINIMAX.md](MINIMAX.md) |
+| `minimax-m2` | `MiniMaxAI/MiniMax-M2` | 4 | 4,5,6,7 | 8006 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | 230B MoE FP8, 128 experts, Anthropic /v1/messages + 4-tool parallel verified, see [MINIMAX.md](MINIMAX.md) |
+| `minimax-m2.7` | `MiniMaxAI/MiniMax-M2.7` | 4 | 4,5,6,7 | 8006 | 16384 | **gaudi-vllm-gemma4:0.19.0** (derived) | 229B MoE FP8, **256 experts + 3 MTP modules**, port conflicts with `minimax-m2`, see [MINIMAX.md](MINIMAX.md#part-2--minimax-m27-apr-2026) |
 | `235b-tp4` | `Qwen/Qwen3-VL-235B-A22B-Thinking-FP8` | 4 | 4,5,6,7 | 8004 | 8192 | vllm-0.17.1 ptfork | 235B MoE on 4 cards. **Port conflicts with `gemma4-31b`** — only one at a time. |
 | `235b-tp8` | `Qwen/Qwen3-VL-235B-A22B-Thinking-FP8` | 8 | 0..7 | 8006 | 32768 | vllm-0.17.1 ptfork | maximum context on 8 cards |
 
@@ -37,10 +38,28 @@ defrag-OOM and similar transient failures.
 - See [MINIMAX.md](MINIMAX.md) for full launch + smoke-test walkthrough
 - **Architecture:** `MiniMaxM2ForCausalLM` — vllm-gaudi ships handcrafted `HpuMiniMaxM2ForCausalLM` (overrides upstream registration at import time)
 - **FP8 kernel:** `HPUChannelWiseTorchFP8ScaledMMLinearKernel` selected automatically
+- **MoE shape:** 128 experts, top-4
 - **TP=4** on Gaudis 4-7; ~107 GB/card steady-state
 - **Flags:** `--tool-call-parser minimax_m2 --reasoning-parser minimax_m2`
 - **Verified:** `/v1/messages` reasoning + text blocks, parallel tool calls × 4 different tools (weather/flights/exchange/hotel)
-- **Disk:** ~215 GB (130 FP8 safetensors shards from MiniMaxAI directly)
+- **Disk:** ~215 GB (125 FP8 safetensors shards from MiniMaxAI directly)
+
+### MiniMax M2.7 FP8 (`MiniMaxAI/MiniMax-M2.7`)
+
+- **Image:** `gaudi-vllm-gemma4:0.19.0` — same image as M2; no new patches
+- See [MINIMAX.md § Part 2](MINIMAX.md#part-2--minimax-m27-apr-2026) for the deep-dive on the 256-expert/MTP shape
+- **Architecture:** `MiniMaxM2ForCausalLM` (same class → same HPU override fires)
+- **MoE shape:** **256 experts, top-8** (vs M2's 128 / top-4) + **3 MTP modules** loaded as layers 62/63/64
+- **TP=4** on Gaudis 4-7; ~101 GB/card steady-state with tightened knobs
+- **Auto-applied knobs** (different from M2 because per-card weights + routing state are bigger):
+  - `--gpu-memory-utilization 0.85`
+  - `--max-num-seqs 16`
+  - `HABANA_PGM_LRU_MAX=60000`
+- **Same parsers as M2:** `--tool-call-parser minimax_m2 --reasoning-parser minimax_m2` (parser registry uses the model_type `minimax_m2`, which both versions share)
+- **Verified:** 17*89, snail-problem reasoning, parallel tools × 4 different tools (May 2026)
+- **Disk:** ~215 GiB on disk / ~230 GB nominal (125 FP8 safetensors shards — note the `of-00130` filename pattern is misleading; only 125 shards actually exist per the index)
+- **Cold load time:** ~30-40 min (vs M2's ~15 min) — 256-expert weight processing is CPU-bound and silent for ~30 min before HBM takeoff
+- **Port-conflicts with `minimax-m2`** (both use 8006 + Gaudis 4-7) — one at a time
 
 ### gpt-oss-120b BF16 (`unsloth/gpt-oss-120b-BF16`)
 
