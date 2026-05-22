@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+# launchpad — interactive vLLM model launcher for the Gaudi 3 box.
+#
+# Walks you through: see what's running → pick a model → pick cards → launch
+# → wait for ready → smoke test → final report.
+#
+# Built on top of `vllm-launch` (uses its LAUNCH_DEVICES / LAUNCH_PORT env
+# overrides), so any preset defined there is available here.
+#
+# Usage:
+#   ./launchpad                  # interactive
+#   ./launchpad stop <preset>    # quick stop wrapper
+#   ./launchpad state            # just show the state matrix and exit
+set -uo pipefail
+
+VLLM_LAUNCH="$(dirname "$(readlink -f "$0")")/vllm-launch"
+
+# ─── colors ────────────────────────────────────────────────────────────────
+C=$'\033[1;36m'; G=$'\033[1;32m'; R=$'\033[1;31m'; Y=$'\033[1;33m'
+B=$'\033[1;34m'; M=$'\033[1;35m'; D=$'\033[2m'; N=$'\033[0m'
+BAR=$'█'; HALF=$'▒'
+
+# ─── presets table (mirrors vllm-launch PRESETS) ──────────────────────────
+# columns: preset|description|TP|default-cards|port|notes
+declare -a PRESETS_DISPLAY=(
+  "32b-thinking|Qwen3-VL-32B-Thinking FP8 (vision + <think>)|1|0|8000|"
+  "32b-instruct|Qwen3-VL-32B-Instruct FP8 (fast direct)|1|1|8001|"
+  "30b-a3b|Qwen3-VL-30B-A3B-Thinking FP8 (MoE 30B/3B)|1|0|8002|"
+  "8b-thinking|Qwen3-VL-8B-Thinking FP8 (small/fast)|1|0|8003|"
+  "gemma4-31b|Gemma 4 31B Instruct FP8 (Anthropic /v1/messages)|1|2|8004|5 patches"
+  "minimax-m2|MiniMax-M2 230B MoE FP8 (128 experts)|4|4,5,6,7|8006|recommended"
+  "minimax-m2.7|MiniMax-M2.7 229B MoE FP8 (256 experts + MTP)|4|4,5,6,7|8006|tighter knobs"
+  "235b-tp4|Qwen3-VL-235B-A22B-Thinking FP8 (TP=4)|4|4,5,6,7|8004|"
+  "235b-tp8|Qwen3-VL-235B-A22B-Thinking FP8 (TP=8 full box)|8|0,1,2,3,4,5,6,7|8006|"
+  "gpt-oss-120b|OpenAI gpt-oss-120b BF16 ⚠️ INCOHERENT|4|3,4,5,6|8005|broken on this stack"
+)
+
+# ─── ui helpers ───────────────────────────────────────────────────────────
+banner() {
+  echo -e "${C}"
+  cat <<'EOF'
+ ╔═══════════════════════════════════════════════════════════════════════╗
+ ║      G A U D I   3   L A U N C H P A D                                ║
+ ║                                                                       ║
+ ║      interactive vLLM model launcher                                  ║
+ ║      github.com/YpS-YpS/gaudi-images-port                             ║
+ ╚═══════════════════════════════════════════════════════════════════════╝
+EOF
+  echo -e "${N}"
+}
+
+draw_card_matrix() {
+  echo -e "${B}┌── Gaudi 3 card state ────────────────────────────────────────────────┐${N}"
+  # Build a map of card → container
+  declare -A card2cnt
+  while read -r cnt; do
+    [ -z "$cnt" ] && continue
+    devs=$(docker inspect "$cnt" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null | grep HABANA_VISIBLE_DEVICES | cut -d= -f2)
+    IFS=',' read -ra arr <<<"$devs"
+    for d in "${arr[@]}"; do card2cnt[$d]="$cnt"; done
+  done < <(docker ps --filter name=vllm- --format '{{.Names}}')
+
+  hl-smi --query-aip=index,memory.used,memory.total --format=csv,noheader 2>/dev/null | while IFS=', ' read -r idx used total; do
+    used=${used%% *}; total=${total%% *}
+    pct=$((used * 100 / total))
+    # Build bar
+    full=$((pct / 5))            # 20-char bar
+    empty=$((20 - full))
+    bar=""
+    for ((i=0;i<full;i++)); do bar+="${BAR}"; done
+    for ((i=0;i<empty;i++)); do bar+="${HALF}"; done
+
+    # Color based on usage
+    if   [ "$pct" -gt 90 ]; then col="${R}"
+    elif [ "$pct" -gt 70 ]; then col="${Y}"
+    else                         col="${G}"
+    fi
+
+    cnt="${card2cnt[$idx]:-${D}(free)${N}}"
+    printf " ${B}│${N}  Gaudi ${M}%d${N}  ${col}%s${N} %3d%%  ${D}%5d/%5d MiB${N}  %-30s${B}│${N}\n" "$idx" "$bar" "$pct" "$used" "$total" "$cnt"
+  done
+  echo -e "${B}└──────────────────────────────────────────────────────────────────────┘${N}"
+}
+
+list_running() {
+  echo -e "${B}┌── Running endpoints ─────────────────────────────────────────────────┐${N}"
+  local found=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    found=1
+    printf " ${B}│${N}  %s${B}│${N}\n" "$(printf '%-67s' "$line")"
+  done < <(docker ps --filter name=vllm- --format '{{.Names}}   {{.Status}}   ports: {{.Ports}}')
+  [ "$found" -eq 0 ] && printf " ${B}│${N}  ${D}(none)${N}                                                              ${B}│${N}\n"
+  echo -e "${B}└──────────────────────────────────────────────────────────────────────┘${N}"
+}
+
+show_presets_menu() {
+  echo -e "${B}┌── Available models (vLLM presets) ───────────────────────────────────┐${N}"
+  printf " ${B}│${N}  ${D}%2s  %-15s %-43s  %s${N}${B}│${N}\n" "#" "preset" "model" "TP/cards/port"
+  printf " ${B}│${N}  ${D}──────────────────────────────────────────────────────────────────${N}${B}│${N}\n"
+  local i=1
+  for row in "${PRESETS_DISPLAY[@]}"; do
+    IFS='|' read -r preset desc tp devs port notes <<<"$row"
+    local label="${preset}"
+    local mark=""
+    [ -n "$notes" ] && [ "$notes" = "broken on this stack" ] && mark=" ${R}⚠${N}" && label="${preset}"
+    [ -n "$notes" ] && [ "$notes" = "recommended" ] && mark=" ${G}★${N}"
+    printf " ${B}│${N}  ${C}%2d${N}  ${M}%-15s${N} %-43s  ${D}%s/%s/%s${N}%s${B}│${N}\n" \
+      "$i" "$label" "${desc:0:43}" "$tp" "$devs" "$port" "$mark"
+    i=$((i+1))
+  done
+  printf " ${B}│${N}  ${C}%2s${N}  %-15s %-43s  ${D}%s${N}    ${B}│${N}\n" "s" "stop" "stop a running endpoint" ""
+  printf " ${B}│${N}  ${C}%2s${N}  %-15s %-43s  ${D}%s${N}    ${B}│${N}\n" "S" "stop-all" "stop ALL vllm-* containers" ""
+  printf " ${B}│${N}  ${C}%2s${N}  %-15s %-43s  ${D}%s${N}    ${B}│${N}\n" "q" "quit" "exit launchpad without doing anything" ""
+  echo -e "${B}└──────────────────────────────────────────────────────────────────────┘${N}"
+}
+
+select_preset() {
+  local idx="$1"
+  if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#PRESETS_DISPLAY[@]}" ]; then
+    echo "${PRESETS_DISPLAY[$((idx-1))]}"
+  else
+    echo ""
+  fi
+}
+
+prompt_cards() {
+  local preset="$1" default_devs="$2" tp_expected="$3"
+  echo ""
+  echo -e "${Y}selected preset:${N} ${M}$preset${N}"
+  echo -e "${Y}default cards:${N}   $default_devs ${D}(TP=$tp_expected)${N}"
+  echo ""
+  read -p "use defaults? [Y/n/comma-separated card list e.g. 0,1]: " ans
+  case "${ans:-y}" in
+    ""|y|Y|yes|YES)
+      echo "$default_devs"
+      ;;
+    n|N|no|NO)
+      echo "__CANCEL__"
+      ;;
+    *)
+      # Validate the custom list
+      local cnt=$(awk -F',' '{print NF}' <<<"$ans")
+      if [ "$cnt" -ne "$tp_expected" ]; then
+        echo -e "${R}ERROR: preset wants TP=$tp_expected but you gave $cnt cards${N}" >&2
+        echo "__CANCEL__"
+      else
+        echo "$ans"
+      fi
+      ;;
+  esac
+}
+
+prompt_port() {
+  local default_port="$1"
+  read -p "port? [default $default_port]: " ans
+  echo "${ans:-$default_port}"
+}
+
+wait_ready() {
+  local port="$1" timeout="${2:-1500}"
+  local start=$(date +%s)
+  echo ""
+  echo -ne "${B}waiting for endpoint http://localhost:$port/v1/models${N}  "
+  while true; do
+    elapsed=$(($(date +%s) - start))
+    if curl -fsS --max-time 3 "http://localhost:$port/v1/models" >/dev/null 2>&1; then
+      echo -e " ${G}READY${N} (${elapsed}s)"
+      return 0
+    fi
+    if [ "$elapsed" -gt "$timeout" ]; then
+      echo -e " ${R}TIMEOUT${N} (>${timeout}s)"
+      return 1
+    fi
+    printf "."
+    sleep 10
+  done
+}
+
+smoke_test() {
+  local port="$1"
+  echo ""
+  echo -e "${C}┌── SMOKE TEST: 17 × 89 ───────────────────────────────────────────────┐${N}"
+  # Discover served model name
+  local model=$(curl -s "http://localhost:$port/v1/models" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null)
+  if [ -z "$model" ]; then
+    echo -e " ${B}│${N}  ${R}could not fetch /v1/models${N}                                          ${B}│${N}"
+    echo -e "${C}└──────────────────────────────────────────────────────────────────────┘${N}"
+    return 1
+  fi
+  printf " ${B}│${N}  served model: ${C}%s${N}\n" "$model"
+
+  local start=$(date +%s.%N)
+  local resp=$(curl -sX POST "http://localhost:$port/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    --max-time 180 \
+    -d "{\"model\":\"$model\",\"max_tokens\":300,
+         \"messages\":[{\"role\":\"user\",\"content\":\"What is 17 * 89? Answer concisely.\"}]}")
+  local end=$(date +%s.%N)
+  local elapsed=$(awk "BEGIN {printf \"%.1f\", $end - $start}")
+
+  python3 - <<PY
+import json, textwrap, sys
+try:
+    r = json.loads('''$resp''')
+except Exception as e:
+    print(f"  ${R}parse error: {e}${N}")
+    sys.exit(1)
+if "error" in r:
+    print(f"  ${R}ERROR: {r['error']}${N}")
+    sys.exit(1)
+c = r["choices"][0]; m = c["message"]
+content = (m.get("content") or "").strip()
+fr = c.get("finish_reason")
+u = r.get("usage") or {}
+print(f"  finish: {fr}")
+print(f"  tokens: prompt={u.get('prompt_tokens')} completion={u.get('completion_tokens')}  (${elapsed}s)")
+print()
+wrapped = textwrap.fill(content[:400], 64, initial_indent="  ", subsequent_indent="  ")
+print(wrapped)
+print()
+if "1513" in content or "1,513" in content:
+    print("  ${G}✓ correct answer (1513)${N}")
+else:
+    print("  ${Y}⚠ expected 1513, parse manually:${N}")
+PY
+  echo -e "${C}└──────────────────────────────────────────────────────────────────────┘${N}"
+}
+
+final_report() {
+  local preset="$1" port="$2" devices="$3" status="$4" elapsed="$5"
+  echo ""
+  echo -e "${G}╔══ LAUNCH REPORT ════════════════════════════════════════════════════╗${N}"
+  printf "${G}║${N}  preset       ${M}%-58s${N} ${G}║${N}\n" "$preset"
+  printf "${G}║${N}  cards        %-58s ${G}║${N}\n" "$devices"
+  printf "${G}║${N}  port         %-58s ${G}║${N}\n" "$port"
+  printf "${G}║${N}  status       %-58s ${G}║${N}\n" "$status"
+  printf "${G}║${N}  total time   %-58s ${G}║${N}\n" "${elapsed}s"
+  printf "${G}║${N}  endpoint     %-58s ${G}║${N}\n" "http://localhost:$port/v1/"
+  printf "${G}║${N}  follow logs  %-58s ${G}║${N}\n" "vllm-launch logs $preset"
+  printf "${G}║${N}  stop         %-58s ${G}║${N}\n" "vllm-launch stop $preset"
+  echo -e "${G}╚═════════════════════════════════════════════════════════════════════╝${N}"
+}
+
+# ─── quick commands ───────────────────────────────────────────────────────
+case "${1:-}" in
+  state|status)
+    banner; draw_card_matrix; echo ""; list_running; exit 0
+    ;;
+  stop)
+    "$VLLM_LAUNCH" stop "${2:?need preset}"; exit 0
+    ;;
+  stop-all)
+    "$VLLM_LAUNCH" stop-all; exit 0
+    ;;
+esac
+
+# ─── main interactive flow ────────────────────────────────────────────────
+banner
+draw_card_matrix
+echo ""
+list_running
+echo ""
+show_presets_menu
+echo ""
+read -p "pick #: " choice
+
+# Quick exits
+[[ "$choice" =~ ^[qQ]$ ]] && { echo "bye."; exit 0; }
+[[ "$choice" == "s" ]] && {
+  read -p "stop which preset? " name
+  "$VLLM_LAUNCH" stop "$name"
+  exit 0
+}
+[[ "$choice" == "S" ]] && {
+  read -p "stop-all? this kills every vllm-* container [y/N]: " conf
+  [[ "$conf" =~ ^[yY]$ ]] && "$VLLM_LAUNCH" stop-all
+  exit 0
+}
+
+row=$(select_preset "$choice")
+[ -z "$row" ] && { echo -e "${R}invalid choice${N}"; exit 1; }
+IFS='|' read -r preset desc tp default_devs default_port notes <<<"$row"
+
+# Warn about broken
+if [ "$notes" = "broken on this stack" ]; then
+  echo -e "${R}⚠ this preset is documented as broken (incoherent output) — see docs/GPT-OSS.md${N}"
+  read -p "still launch? [y/N]: " conf
+  [[ ! "$conf" =~ ^[yY]$ ]] && { echo "cancelled."; exit 0; }
+fi
+
+devices=$(prompt_cards "$preset" "$default_devs" "$tp")
+[ "$devices" = "__CANCEL__" ] && { echo "cancelled."; exit 0; }
+
+port=$(prompt_port "$default_port")
+
+# Conflict check — is something already bound to this port?
+if ss -tln 2>/dev/null | grep -q ":$port "; then
+  echo -e "${Y}port $port is in use. existing container on it:${N}"
+  docker ps --format '{{.Names}} {{.Ports}}' | grep ":$port" || echo "  (something outside docker)"
+  read -p "stop it and continue? [y/N]: " conf
+  if [[ "$conf" =~ ^[yY]$ ]]; then
+    occupant=$(docker ps --format '{{.Names}}' --filter "publish=$port" | head -1)
+    [ -n "$occupant" ] && docker rm -f "$occupant"
+  else
+    echo "cancelled."
+    exit 0
+  fi
+fi
+
+# Launch
+echo ""
+echo -e "${C}─── launching $preset on cards $devices, port $port ───${N}"
+START=$(date +%s)
+LAUNCH_DEVICES="$devices" LAUNCH_PORT="$port" "$VLLM_LAUNCH" "$preset"
+
+wait_ready "$port" 1500
+ready_status=$?
+
+if [ "$ready_status" -eq 0 ]; then
+  smoke_test "$port"
+  STATUS="${G}READY + SMOKE OK${N}"
+else
+  echo -e "${R}endpoint did not come up in time — last logs:${N}"
+  "$VLLM_LAUNCH" logs "$preset" 2>&1 | tail -40 || true
+  STATUS="${R}STARTUP TIMEOUT${N}"
+fi
+
+END=$(date +%s)
+final_report "$preset" "$port" "$devices" "$STATUS" "$((END - START))"

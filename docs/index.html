@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gaudi-images-port — vLLM serving on 8× Intel Gaudi 3</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --bg2:     #161b22;
+    --bg3:     #1c2128;
+    --border:  #30363d;
+    --text:    #c9d1d9;
+    --dim:     #8b949e;
+    --link:    #58a6ff;
+    --green:   #3fb950;
+    --amber:   #d29922;
+    --red:     #f85149;
+    --pink:    #ff7b72;
+    --purple:  #bc8cff;
+    --cyan:    #79c0ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  code, pre, .mono {
+    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', Consolas, monospace;
+    font-size: 0.92em;
+  }
+  pre {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    color: var(--text);
+  }
+  code { background: var(--bg2); padding: 2px 6px; border-radius: 4px; color: var(--cyan); }
+  pre code { background: none; padding: 0; color: inherit; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  h1, h2, h3, h4 { color: #f0f6fc; margin-top: 1.6em; }
+  h1 { font-size: 2em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+  h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 0.25em; }
+  h3 { font-size: 1.18em; }
+
+  /* Layout */
+  .container { max-width: 1080px; margin: 0 auto; padding: 36px 28px 80px; }
+  header.hero {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 56px 28px 40px;
+    text-align: center;
+  }
+  header.hero h1 {
+    font-size: 2.6em;
+    margin: 0 0 8px;
+    background: linear-gradient(90deg, var(--cyan), var(--purple));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    border: none;
+  }
+  header.hero p.sub {
+    color: var(--dim); margin: 0; font-size: 1.05em;
+  }
+  header.hero .badges {
+    margin-top: 18px;
+    display: inline-flex; gap: 10px; flex-wrap: wrap; justify-content: center;
+  }
+  header.hero .badge {
+    background: var(--bg3); border: 1px solid var(--border);
+    padding: 5px 14px; border-radius: 20px; font-size: 0.85em;
+    color: var(--text);
+  }
+
+  nav.toc {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 28px;
+    text-align: center;
+    font-size: 0.92em;
+  }
+  nav.toc a { margin: 0 12px; color: var(--dim); }
+  nav.toc a:hover { color: var(--cyan); }
+
+  /* Cheat sheet table */
+  table.cheat {
+    width: 100%; border-collapse: collapse; margin: 18px 0;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    font-size: 0.95em;
+  }
+  table.cheat th, table.cheat td {
+    padding: 10px 14px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  table.cheat th { background: var(--bg3); color: var(--cyan); font-weight: 600; }
+  table.cheat tr:last-child td { border-bottom: none; }
+  table.cheat tr:hover td { background: var(--bg3); }
+  table.cheat td.mono { font-family: 'JetBrains Mono', monospace; color: var(--cyan); }
+  table.cheat td.broken { color: var(--red); }
+  table.cheat td.star::before { content: "★ "; color: var(--amber); }
+
+  /* Model card */
+  .model-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 18px 0;
+    transition: border-color 0.15s;
+  }
+  .model-card:hover { border-color: var(--link); }
+  .model-card.broken { border-color: rgba(248, 81, 73, 0.4); }
+  .model-card.broken h3 { color: var(--red); }
+  .model-card.star { border-color: rgba(210, 153, 34, 0.4); }
+  .model-card h3 { margin-top: 0; display: flex; align-items: center; gap: 10px; }
+  .tag {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.74em; font-weight: 600; vertical-align: middle;
+    background: var(--bg3); border: 1px solid var(--border);
+  }
+  .tag.cyan { color: var(--cyan); border-color: var(--cyan); }
+  .tag.green { color: var(--green); border-color: var(--green); }
+  .tag.amber { color: var(--amber); border-color: var(--amber); }
+  .tag.red { color: var(--red); border-color: var(--red); }
+  .tag.purple { color: var(--purple); border-color: var(--purple); }
+
+  .model-meta {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 16px;
+    font-size: 0.9em;
+    margin: 10px 0 14px;
+  }
+  .model-meta dt { color: var(--dim); }
+  .model-meta dd { margin: 0; }
+
+  /* Patch box */
+  .patch-box {
+    background: var(--bg2); border: 1px solid var(--border); border-left: 3px solid var(--purple);
+    border-radius: 6px; padding: 14px 18px; margin: 12px 0;
+  }
+  .patch-box h4 { margin: 0 0 8px; color: var(--purple); }
+
+  /* Tree */
+  pre.tree {
+    background: var(--bg2);
+    line-height: 1.5;
+  }
+  pre.tree a { color: var(--cyan); }
+  pre.tree .dim { color: var(--dim); }
+
+  /* Callout */
+  .callout {
+    background: rgba(210, 153, 34, 0.08);
+    border-left: 3px solid var(--amber);
+    padding: 12px 18px;
+    border-radius: 0 6px 6px 0;
+    margin: 14px 0;
+  }
+  .callout.danger {
+    background: rgba(248, 81, 73, 0.08);
+    border-left-color: var(--red);
+  }
+  .callout.info {
+    background: rgba(88, 166, 255, 0.08);
+    border-left-color: var(--link);
+  }
+  .callout.success {
+    background: rgba(63, 185, 80, 0.08);
+    border-left-color: var(--green);
+  }
+
+  /* ASCII diagram */
+  pre.diagram {
+    background: var(--bg2);
+    color: var(--cyan);
+    text-align: center;
+    font-size: 0.85em;
+    line-height: 1.3;
+  }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    margin-top: 60px;
+    padding: 24px;
+    text-align: center;
+    color: var(--dim);
+    font-size: 0.9em;
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <h1>gaudi-images-port</h1>
+  <p class="sub">One-click bring-up + multi-model vLLM serving on an 8× Intel Gaudi 3 box</p>
+  <div class="badges">
+    <span class="badge">Ubuntu 24.04</span>
+    <span class="badge">Kernel 6.8</span>
+    <span class="badge">Habana 1.24.0</span>
+    <span class="badge">vLLM 0.17 + 0.19</span>
+    <span class="badge">Dell XE9680</span>
+  </div>
+  <div class="badges" style="margin-top: 14px;">
+    <a class="badge" href="https://github.com/YpS-YpS/gaudi-images-port" style="color:var(--cyan); border-color:var(--cyan);">
+      ↗ github.com/YpS-YpS/gaudi-images-port
+    </a>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#tldr">tl;dr</a> ·
+  <a href="#models">models</a> ·
+  <a href="#patches">patches</a> ·
+  <a href="#layout">layout</a> ·
+  <a href="#manual">manual run</a> ·
+  <a href="#verify">verify</a>
+</nav>
+
+<div class="container">
+
+<!-- ─── tl;dr ──────────────────────────────────────────────────── -->
+<h2 id="tldr">tl;dr — one command on a fresh box</h2>
+
+<pre><code>git clone https://github.com/YpS-YpS/gaudi-images-port.git
+cd gaudi-images-port
+sudo ./bootstrap.sh --with-gemma4          <span style="color:var(--dim);"># ~30-60 min; reboots once if kernel swap is needed</span>
+</code></pre>
+
+<p>That installs kernel 6.8, the Habana driver, hugepages, NICs, Docker; pulls
+the two vLLM base images; builds the patched Gemma 4 image; downloads both
+models; launches Qwen 32B-Thinking on port 8000 and Gemma 4 on port 8004.</p>
+
+<p>After bootstrap, every other model is one line: <code>vllm-launch &lt;preset&gt;</code> —
+see the table below.</p>
+
+<!-- ─── architecture diagram ──────────────────────────────────── -->
+<h2>Box architecture</h2>
+
+<pre class="diagram">
+                          ┌─── Dell PowerEdge XE9680 ───┐
+                          │   2× Xeon 8480+ (224 cores) │
+                          │   2 TB DDR5 │ 7 TB NVMe     │
+                          │                              │
+   ┌─────────┐            │   8× Intel Gaudi 3 HL-325    │            ┌──────────────┐
+   │ vLLM    │ ◄─── HBM ──┤   (128 GiB HBM2e each)        ├── HF cache ─┤  hf-cache/   │
+   │ 0.17.1  │            │                              │            │ ~/hf-cache/  │
+   │ + 0.19  │            │   24× internal scale-out NIC │            └──────────────┘
+   └─────────┘            └──────────────────────────────┘
+       │
+       ├── port 8000  Qwen3-VL-32B-Thinking      (Gaudi 0)
+       ├── port 8001  Qwen3-VL-32B-Instruct      (Gaudi 1)
+       ├── port 8004  Gemma 4 31B  (Anthropic /v1/messages)  (Gaudi 2)
+       ├── port 8005  Gemma 4 31B  (second instance)         (Gaudi 3)
+       └── port 8006  MiniMax M2  TP=4           (Gaudis 4-7)
+</pre>
+
+<!-- ─── cheat sheet ───────────────────────────────────────────── -->
+<h2 id="models">🚀 Cheat sheet — one line to launch any model</h2>
+
+<p>Every model below launches with one <code>vllm-launch &lt;preset&gt;</code> command. The
+script lives in <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/bin/vllm-launch"><code>bin/vllm-launch</code></a>.</p>
+
+<table class="cheat">
+<thead><tr><th>#</th><th>Model</th><th>One-line launch</th><th>Port</th><th>Cards</th><th>HBM/card</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Qwen3-VL-32B-Thinking <span class="tag cyan">vision + &lt;think&gt;</span></td><td class="mono">vllm-launch 32b-thinking</td><td>8000</td><td>0</td><td>~76 GB</td></tr>
+<tr><td>2</td><td>Qwen3-VL-32B-Instruct <span class="tag green">fast direct</span></td><td class="mono">vllm-launch 32b-instruct</td><td>8001</td><td>1</td><td>~76 GB</td></tr>
+<tr><td>3</td><td>Qwen3-VL-30B-A3B <span class="tag purple">MoE</span></td><td class="mono">vllm-launch 30b-a3b</td><td>8002</td><td>0</td><td>~70 GB</td></tr>
+<tr><td>4</td><td>Qwen3-VL-8B-Thinking <span class="tag cyan">small</span></td><td class="mono">vllm-launch 8b-thinking</td><td>8003</td><td>0</td><td>~22 GB</td></tr>
+<tr class="star"><td>5</td><td>Gemma 4 31B <span class="tag amber">Anthropic /v1/messages</span></td><td class="mono">vllm-launch gemma4-31b</td><td>8004</td><td>2</td><td>~95 GB</td></tr>
+<tr class="star"><td>6</td><td>MiniMax M2 <span class="tag purple">230B MoE / 128 experts</span></td><td class="mono">vllm-launch minimax-m2</td><td>8006</td><td>4-7</td><td>~107 GB</td></tr>
+<tr><td>7</td><td>MiniMax M2.7 <span class="tag amber">229B MoE / 256 experts + MTP</span></td><td class="mono">vllm-launch minimax-m2.7</td><td>8006</td><td>4-7</td><td>~101 GB</td></tr>
+<tr><td>8</td><td>Qwen3-VL-235B-A22B TP=4 <span class="tag purple">MoE</span></td><td class="mono">vllm-launch 235b-tp4</td><td>8004</td><td>4-7</td><td>~110 GB</td></tr>
+<tr><td>9</td><td>Qwen3-VL-235B-A22B TP=8</td><td class="mono">vllm-launch 235b-tp8</td><td>8006</td><td>0-7</td><td>~60 GB</td></tr>
+<tr><td>⚠</td><td class="broken">gpt-oss-120b — loads but incoherent</td><td class="mono">vllm-launch gpt-oss-120b</td><td>8005</td><td>3-6</td><td>—</td></tr>
+</tbody>
+</table>
+
+<div class="callout">
+  <strong>Port / card conflicts (mutually-exclusive groups):</strong>
+  <ul style="margin: 6px 0;">
+    <li><code>gemma4-31b</code> ↔ <code>235b-tp4</code> (both want port 8004)</li>
+    <li><code>minimax-m2</code> ↔ <code>minimax-m2.7</code> (same port 8006 + same Gaudis 4-7)</li>
+    <li><code>235b-tp8</code> ↔ everything else (uses all 8 cards)</li>
+  </ul>
+</div>
+
+<h3>Launchpad — interactive picker</h3>
+
+<p>If you'd rather not memorize preset names, run the interactive launchpad
+(also in <code>bin/</code>):</p>
+
+<pre><code>./bin/launchpad
+</code></pre>
+
+<p>It shows the current card matrix (per-card HBM bars, which container owns each), a numbered menu of every preset, prompts for card overrides (e.g. run <code>minimax-m2</code> on Gaudis 0-3 instead of 4-7), waits for the endpoint to be ready, fires a 17×89 smoke test, and prints a launch report. Source:
+<a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/bin/launchpad"><code>bin/launchpad</code></a>.</p>
+
+<h3>Quick test — works for any running endpoint</h3>
+
+<pre><code><span style="color:var(--dim);"># basic smoke</span>
+curl -s http://localhost:&lt;PORT&gt;/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"&lt;served-name&gt;","max_tokens":200,
+       "messages":[{"role":"user","content":"What is 17 * 89?"}]}'
+
+<span style="color:var(--dim);"># full smoke (text + vision + tools + parallel tools)</span>
+scripts/smoke.sh http://localhost:&lt;PORT&gt; &lt;served-name&gt;
+
+<span style="color:var(--dim);"># cross-endpoint quality bench (L1 Dep test across all running models)</span>
+scripts/quality-bench.sh
+</code></pre>
+
+<!-- ─── per-model details ─────────────────────────────────────── -->
+<h2>📦 The models — details + per-model docs</h2>
+
+<div class="model-card">
+  <h3>Qwen3-VL-32B-Thinking <span class="tag cyan">vision</span> <span class="tag amber">reasoning</span></h3>
+  <dl class="model-meta">
+    <dt>HF model</dt>             <dd><code>Qwen/Qwen3-VL-32B-Thinking-FP8</code></dd>
+    <dt>port / served as</dt>     <dd>8000 · <code>qwen3-vl-32b-thinking</code></dd>
+    <dt>card / TP</dt>            <dt></dt><dd>Gaudi 0 · TP=1</dd>
+    <dt>HBM</dt>                  <dd>~76 GiB steady on 1 Gaudi 3</dd>
+    <dt>image</dt>                <dd><code>vault.habana.ai/.../vllm-0.17.1-ptfork-2.10.0:1.24.0-1007</code> (stock Habana, no patches)</dd>
+    <dt>throughput</dt>           <dd>~49 tok/s single-user, FP8, 16k context</dd>
+  </dl>
+  <p>Vision-language with FP8 weights. Returns <code>&lt;think&gt;...&lt;/think&gt;</code> blocks
+  which vLLM parses into a separate <code>reasoning_content</code> field via
+  <code>--reasoning-parser qwen3</code>. Hermes tool format. No patches needed.</p>
+  <pre><code>vllm-launch 32b-thinking
+scripts/smoke.sh http://localhost:8000 qwen3-vl-32b-thinking</code></pre>
+</div>
+
+<div class="model-card star">
+  <h3>Gemma 4 31B Instruct FP8 <span class="tag amber">Anthropic API</span> <span class="tag purple">5 patches</span></h3>
+  <dl class="model-meta">
+    <dt>HF model</dt>             <dd><code>RedHatAI/gemma-4-31b-it-FP8-Dynamic</code></dd>
+    <dt>port / served as</dt>     <dd>8004 · <code>gemma4-31b</code></dd>
+    <dt>card / TP</dt>            <dd>Gaudi 2 · TP=1</dd>
+    <dt>HBM</dt>                  <dd>~95 GiB steady</dd>
+    <dt>image</dt>                <dd><code>gaudi-vllm-gemma4:0.19.0</code> — derived image with
+      <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/dockerfiles/Dockerfile.gemma4">5 patches</a></dd>
+    <dt>special</dt>              <dd>Both <code>/v1/chat/completions</code> and <code>/v1/messages</code> (Anthropic shape)</dd>
+  </dl>
+  <p>The Anthropic-API-compatible endpoint on this box. Implements the typed
+  content-block shape; works as a drop-in replacement for <code>anthropic.Anthropic(base_url=…)</code>.</p>
+  <p>Heterogeneous attention head dimensions (local head_dim 256, global 512,
+  alternating 5:1) trip <code>vllm-gaudi 0.19</code> without patches — see
+  <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/GEMMA4.md"><code>docs/GEMMA4.md</code></a>
+  for the per-patch deep-dive.</p>
+  <pre><code>vllm-launch gemma4-31b
+scripts/smoke.sh http://localhost:8004 gemma4-31b
+</code></pre>
+  <p>Drop-in Anthropic SDK usage:</p>
+  <pre><code>import anthropic
+c = anthropic.Anthropic(base_url="http://localhost:8004", api_key="dummy")
+r = c.messages.create(model="gemma4-31b", max_tokens=512,
+                      messages=[{"role":"user","content":"hi"}])
+print(r.content[0].text)</code></pre>
+</div>
+
+<div class="model-card star">
+  <h3>MiniMax M2 <span class="tag purple">230B MoE</span> <span class="tag amber">/v1/messages</span></h3>
+  <dl class="model-meta">
+    <dt>HF model</dt>             <dd><code>MiniMaxAI/MiniMax-M2</code></dd>
+    <dt>port / served as</dt>     <dd>8006 · <code>minimax-m2</code></dd>
+    <dt>cards / TP</dt>           <dd>Gaudis 4-7 · TP=4</dd>
+    <dt>HBM</dt>                  <dd>~107 GiB / card</dd>
+    <dt>image</dt>                <dd><code>gaudi-vllm-gemma4:0.19.0</code> (reused — no MiniMax-specific patches needed)</dd>
+    <dt>routing</dt>              <dd>128 experts top-4 + uniform full attention</dd>
+  </dl>
+  <p>Works out of the box. <code>vllm-gaudi</code> ships a handcrafted
+  <code>HpuMiniMaxM2ForCausalLM</code> class that overrides the upstream registration at
+  import time (you'll see the registry warning in the log). Dedicated FP8 GEMM
+  kernel (<code>HPUChannelWiseTorchFP8ScaledMMLinearKernel</code>) selected automatically.</p>
+  <p>Reasoning + parallel-tool support verified — 4 distinct tools called in a
+  single user turn. Anthropic-shape <code>/v1/messages</code> works. Details in
+  <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/MINIMAX.md"><code>docs/MINIMAX.md</code></a>.</p>
+  <pre><code>vllm-launch minimax-m2
+scripts/smoke.sh http://localhost:8006 minimax-m2</code></pre>
+</div>
+
+<div class="model-card">
+  <h3>MiniMax M2.7 <span class="tag amber">229B MoE / 256 experts</span> <span class="tag purple">MTP</span></h3>
+  <dl class="model-meta">
+    <dt>HF model</dt>             <dd><code>MiniMaxAI/MiniMax-M2.7</code></dd>
+    <dt>port / served as</dt>     <dd>8006 · <code>minimax-m2.7</code></dd>
+    <dt>cards / TP</dt>           <dd>Gaudis 4-7 · TP=4</dd>
+    <dt>HBM</dt>                  <dd>~101 GiB / card (with auto-tightened knobs)</dd>
+    <dt>image</dt>                <dd><code>gaudi-vllm-gemma4:0.19.0</code> (same image as M2)</dd>
+    <dt>auto-applied knobs</dt>   <dd><code>--gpu-memory-utilization 0.85</code> · <code>--max-num-seqs 16</code> · <code>HABANA_PGM_LRU_MAX=60000</code></dd>
+  </dl>
+  <p>Successor to M2 with 2× experts (256 vs 128), top-8 routing (vs top-4),
+  and 3 MTP modules loaded as layers 62/63/64. Same architecture class →
+  <code>HpuMiniMaxM2ForCausalLM</code> override applies as-is.</p>
+  <div class="callout">
+    <strong>Cold load is slow.</strong> ~30-40 min from launch to ready
+    (256-expert × 62-layer × TP=4 weight processing is CPU-bound and silent
+    for ~30 min before HBM takeoff). Don't kill it — check
+    <code>docker stats vllm-minimax-m2.7</code> for climbing Block I/O.
+  </div>
+  <p>Full deep-dive incl. the 130-vs-125 shard naming quirk and per-card HBM
+  breakdown in <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/MINIMAX.md#part-2--minimax-m27-apr-2026"><code>MINIMAX.md § Part 2</code></a>.</p>
+  <pre><code>vllm-launch stop minimax-m2        <span style="color:var(--dim);"># M2 must stop first — same port + cards</span>
+vllm-launch minimax-m2.7
+scripts/smoke.sh http://localhost:8006 minimax-m2.7</code></pre>
+</div>
+
+<div class="model-card broken">
+  <h3>gpt-oss-120b / gpt-oss-20b <span class="tag red">BROKEN</span></h3>
+  <dl class="model-meta">
+    <dt>tested</dt>          <dd><code>unsloth/gpt-oss-120b-BF16</code>, <code>openai/gpt-oss-120b</code> (MXFP4), <code>openai/gpt-oss-20b</code></dd>
+    <dt>symptom</dt>         <dd>Loads cleanly. Server responds. Output is incoherent (repetitive loops, off-topic, harmony channels never emit).</dd>
+    <dt>root cause</dt>      <dd>Closed-source HPU MoE kernel (<code>bias_fused_weights</code>) and/or MXFP4 dequant — below user-space.</dd>
+    <dt>workaround</dt>      <dd>None on this stack. Use Gemma 4 31B for Anthropic shape; MiniMax M2 for big-MoE workloads.</dd>
+  </dl>
+  <p>Full failure analysis + upstream bug-report draft in
+  <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/GPT-OSS.md"><code>docs/GPT-OSS.md</code></a>.</p>
+</div>
+
+<!-- ─── patches ──────────────────────────────────────────────── -->
+<h2 id="patches">🔧 Patches & hacks applied to get things running</h2>
+
+<p>Vanilla Habana <code>vllm-gaudi</code> 0.19 ships without handlers for several
+upstream classes that newer model families depend on. The patches below are
+what closed those gaps.</p>
+
+<h3>Gemma 4 31B — five patches</h3>
+
+<p>Layered on top of Habana's <code>vllm-0.19.0-ptfork</code> base image. The Dockerfile
+that applies them is
+<a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/dockerfiles/Dockerfile.gemma4"><code>dockerfiles/Dockerfile.gemma4</code></a>.</p>
+
+<div class="patch-box">
+  <h4>① bump transformers to 5.7</h4>
+  <p>Gemma 4 needs the upstream <code>Gemma4ForCausalLM</code> class, which only landed
+  in transformers ≥5.7. Habana's base image ships 4.55. Patch: explicit
+  <code>pip install transformers==5.7.0.dev</code> + <code>VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1</code>
+  so vLLM doesn't refuse to start.</p>
+</div>
+
+<div class="patch-box">
+  <h4>② head_size=512 added to the allow-list</h4>
+  <p><strong>Symptom:</strong> <code>ValueError: head_size 512 not supported</code>.</p>
+  <p><strong>Why:</strong> Gemma 4 has heterogeneous attention — local layers
+  use <code>head_dim=256</code>, global layers <code>head_dim=512</code>, alternating 5:1. vLLM's
+  HPU attention backend only allow-lists 64, 80, 96, 112, 128, 192, 256.</p>
+  <p><strong>Fix:</strong> add 512 to the supported head_size list in the
+  HPU attention backend.</p>
+</div>
+
+<div class="patch-box">
+  <h4>③ UniformTypeKVCacheSpecs unwrap</h4>
+  <p><strong>Symptom:</strong> Crash inside the KV cache allocator — it gets a
+  <code>UniformTypeKVCacheSpecs</code> wrapper instead of an inner spec.</p>
+  <p><strong>Why:</strong> vLLM 0.19 introduced this wrapper to support models
+  with per-layer-varying head dimensions. <code>vllm-gaudi</code> 0.19 wasn't taught about it.</p>
+  <p><strong>Fix:</strong> detect the wrapper class in the KV cache allocator
+  and unwrap to <code>spec.kv_cache_spec</code> before computing sizes. Patch script:
+  <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/dockerfiles/patch_kv_divisibility.py"><code>dockerfiles/patch_kv_divisibility.py</code></a>.</p>
+</div>
+
+<div class="patch-box">
+  <h4>④ <code>tensor.size</code> → int coercion (upstream float bug)</h4>
+  <p><strong>Symptom:</strong> <code>TypeError: 'float' object cannot be interpreted as integer</code>.</p>
+  <p><strong>Why:</strong> An upstream vLLM site passes <code>tensor.size</code> (a Python
+  float on this path) where an int is expected. Fixed in main but not in the
+  0.19 base.</p>
+  <p><strong>Fix:</strong> <code>int(...)</code> coercion at the offending site.</p>
+</div>
+
+<div class="patch-box">
+  <h4>⑤ skip_special_tokens default flip</h4>
+  <p><strong>Symptom:</strong> Gemma 4's <code>&lt;|channel|&gt;</code> / <code>&lt;|end|&gt;</code> markers get
+  stripped from the output, so the reasoning parser sees nothing.</p>
+  <p><strong>Why:</strong> vLLM defaults <code>skip_special_tokens=True</code>. Gemma 4's
+  channel markers are special tokens.</p>
+  <p><strong>Fix:</strong> flip the default to <code>False</code> for this model family in
+  the OpenAI-compat layer.</p>
+</div>
+
+<h3>MiniMax M2 / M2.7 — handcrafted HPU class</h3>
+
+<p>No patches needed. <code>vllm-gaudi</code> ships a complete handcrafted
+<code>HpuMiniMaxM2ForCausalLM</code> at
+<code>/usr/local/lib/python3.12/dist-packages/vllm_gaudi/models/minimax_m2.py</code>
+(504 lines). At import time it overrides vLLM's upstream
+<code>MiniMaxM2ForCausalLM</code> registration:</p>
+
+<pre><code>WARNING [registry.py:915] Model architecture MiniMaxM2ForCausalLM is already
+registered, and will be overwritten by the new model class
+vllm_gaudi.models.minimax_m2:HpuMiniMaxM2ForCausalLM.</code></pre>
+
+<p>That's the warning you'll see on launch — it's expected and means the HPU
+path is active. The class also handles M2.7's MTP (multi-token prediction)
+weights via <code>get_spec_layer_idx_from_weight_name</code> (lines 498-504), which
+maps them to layer indices <code>num_hidden_layers + i</code>.</p>
+
+<h3>gpt-oss — the bug we couldn't fix</h3>
+
+<p>The HPU MoE kernel <code>torch.ops.hpu.mixture_of_experts.bias_fused_weights</code> is
+binary (part of SynapseAI 1.24.0). It accepts <code>swigluoai</code> defaults
+(<code>alpha=1.702</code>, <code>limit=7.0</code>) — exactly gpt-oss's values — but produces
+incoherent logits for gpt-oss's specific MoE shape. We narrowed it down to
+either that kernel or the MXFP4 dequantizer in
+<code>vllm_gaudi/models/gptoss_mxfp4.py</code>. Either way, not patchable from
+user-space. Full trace + upstream-report draft in
+<a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/GPT-OSS.md"><code>GPT-OSS.md</code></a>.</p>
+
+<!-- ─── layout ───────────────────────────────────────────────── -->
+<h2 id="layout">📂 Project structure</h2>
+
+<p>Every file linked below is on GitHub at the same path.</p>
+
+<pre class="tree">
+gaudi-images-port/
+├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/bootstrap.sh">bootstrap.sh</a>                  <span class="dim"># one-click entrypoint</span>
+├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/install.sh">install.sh</a>                    <span class="dim"># idempotent base bring-up (kernel, driver, docker)</span>
+├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/README.md">README.md</a>                     <span class="dim"># concise launch-first overview</span>
+│
+├── docs/
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/index.html">index.html</a>                <span class="dim"># this page</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/MODELS.md">MODELS.md</a>                 <span class="dim"># per-model table, flags, perf notes</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/GEMMA4.md">GEMMA4.md</a>                 <span class="dim"># the 5 Gemma patches in depth</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/MINIMAX.md">MINIMAX.md</a>                <span class="dim"># MiniMax M2 + M2.7 walkthrough</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/GPT-OSS.md">GPT-OSS.md</a>                <span class="dim"># gpt-oss failure analysis</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/REQUIREMENTS.md">REQUIREMENTS.md</a>           <span class="dim"># hardware / OS / BIOS / network checklist</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/PLAYBOOK.md">PLAYBOOK.md</a>               <span class="dim"># day-1 / day-2 ops</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/CHECKPOINT.md">CHECKPOINT.md</a>             <span class="dim"># snapshot of a known-good system</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/TROUBLESHOOTING.md">TROUBLESHOOTING.md</a>        <span class="dim"># every issue + the actual fix</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/API_ACCESS.md">API_ACCESS.md</a>             <span class="dim"># IDE / Open WebUI / Anthropic-SDK pointers</span>
+│   └── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/docs/GAP_ANALYSIS.md">GAP_ANALYSIS.md</a>           <span class="dim"># what's still missing vs the NVIDIA stack</span>
+│
+├── scripts/
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/scripts/check.sh">check.sh</a>                  <span class="dim"># readiness — green/red checklist</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/scripts/fix.sh">fix.sh</a>                    <span class="dim"># re-apply runtime tunings (no reboot)</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/scripts/verify.sh">verify.sh</a>                 <span class="dim"># readiness + hl_qual + API smoke</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/scripts/smoke.sh">smoke.sh</a>                  <span class="dim"># API-only smoke (text + vision + tools)</span>
+│   └── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/scripts/quality-bench.sh">quality-bench.sh</a>          <span class="dim"># cross-endpoint L1-Dep-style quality bench</span>
+│
+├── systemd/
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/systemd/gaudi-tune.service">gaudi-tune.service</a>        <span class="dim"># MSRs + NIC bring-up on every boot</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/systemd/docker-http-proxy.conf">docker-http-proxy.conf</a>    <span class="dim"># corp proxy for dockerd</span>
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/systemd/habana-modules.conf">habana-modules.conf</a>       <span class="dim"># ib_uverbs + habanalabs_ib autoload</span>
+│   └── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/systemd/habana-hugepages.conf">habana-hugepages.conf</a>     <span class="dim"># vm.nr_hugepages persistence</span>
+│
+├── dockerfiles/
+│   ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/dockerfiles/Dockerfile.gemma4">Dockerfile.gemma4</a>         <span class="dim"># 5-patch derived image → gaudi-vllm-gemma4:0.19.0</span>
+│   └── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/dockerfiles/patch_kv_divisibility.py">patch_kv_divisibility.py</a>  <span class="dim"># the runtime monkey-patch (UniformTypeKVCacheSpecs unwrap)</span>
+│
+└── bin/
+    ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/bin/gaudi-dash">gaudi-dash</a>                <span class="dim"># tmux dashboard (btop + htop + hl-smi)</span>
+    ├── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/bin/vllm-launch">vllm-launch</a>               <span class="dim"># multi-preset launcher (PRESETS array at line 20)</span>
+    └── <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/bin/launchpad">launchpad</a>                 <span class="dim"># interactive picker (this UI layer)</span>
+</pre>
+
+<!-- ─── manual run ──────────────────────────────────────────── -->
+<h2 id="manual">🛠 Running fully manually (no <code>vllm-launch</code> script)</h2>
+
+<p>If you'd rather skip the launcher and run a raw <code>docker run</code> — for example to
+plug into another orchestrator — the exact env vars and flags for each preset
+live in <a href="https://github.com/YpS-YpS/gaudi-images-port/blob/main/bin/vllm-launch"><code>bin/vllm-launch</code></a>
+(see the <code>PRESETS</code> array around line 20 and the <code>docker run</code> block at line 114).</p>
+
+<p>Generic template for any FP8 Qwen model on a single Gaudi:</p>
+
+<pre><code>docker run -d --runtime=habana --restart unless-stopped \
+  --name vllm-myrun \
+  -e HABANA_VISIBLE_DEVICES=0 \
+  -e PT_HPU_LAZY_MODE=1 \
+  -e PT_HPUGRAPH_DISABLE_TENSOR_CACHE=false \
+  -e VLLM_GRAPH_RESERVED_MEM=0.3 \
+  -e VLLM_SKIP_WARMUP=true \
+  -e HF_HOME=/root/.cache/huggingface \
+  --net=host --ipc=host --cap-add=sys_nice \
+  -v $HOME/hf-cache:/root/.cache/huggingface \
+  --entrypoint /bin/bash \
+  vault.habana.ai/gaudi-docker/1.24.0/ubuntu24.04/habanalabs/vllm-0.17.1-ptfork-2.10.0:1.24.0-1007 \
+  -lc 'exec vllm serve Qwen/Qwen3-VL-32B-Thinking-FP8 \
+       --tensor-parallel-size 1 --host 0.0.0.0 --port 8000 \
+       --enable-auto-tool-choice --tool-call-parser hermes \
+       --reasoning-parser qwen3 \
+       --max-model-len 16384 --gpu-memory-utilization 0.9 \
+       --max-num-seqs 32 --trust-remote-code \
+       --served-model-name qwen3-vl-32b-thinking'
+</code></pre>
+
+<p>For Gemma 4 / MiniMax: swap the image to <code>gaudi-vllm-gemma4:0.19.0</code> (built
+via <code>cd dockerfiles && docker build -t gaudi-vllm-gemma4:0.19.0 -f Dockerfile.gemma4 .</code>),
+swap parsers to <code>gemma4</code> or <code>minimax_m2</code>, set the right cards in
+<code>HABANA_VISIBLE_DEVICES</code>, and adjust <code>--tensor-parallel-size</code> to match.</p>
+
+<!-- ─── verify ──────────────────────────────────────────────── -->
+<h2 id="verify">🩺 Verifying the box</h2>
+
+<pre><code>sudo bash scripts/check.sh                <span style="color:var(--dim);"># readiness — green/red checklist</span>
+sudo bash scripts/verify.sh                <span style="color:var(--dim);"># + hl_qual + API smoke</span>
+scripts/smoke.sh http://localhost:8004 gemma4-31b      <span style="color:var(--dim);"># per-endpoint full smoke</span>
+scripts/quality-bench.sh                   <span style="color:var(--dim);"># cross-endpoint domain-knowledge bench</span>
+</code></pre>
+
+<p>The <code>smoke.sh</code> battery exercises <code>/v1/models</code> → plain text → vision (inline
+PNG) → single tool call → parallel tools × 4 cities → parallel mixed × 4
+different tools.</p>
+
+<p>The <code>quality-bench.sh</code> fires a domain-knowledge prompt
+("What is L1 Dep in microarchitecture and how does it affect gaming
+performance?") against every running endpoint in parallel and lets you eyeball
+which model gives the sharpest answer.</p>
+
+<div class="callout info">
+  <strong>HBM rises to ~90-99% used per active card.</strong> That's the vLLM
+  pre-allocation — <code>--gpu-memory-utilization 0.9</code> means the driver claims 90%
+  of HBM upfront and manages the pool internally. It doesn't grow further.
+  Restart the container weekly if you want to clear accumulated fragmentation
+  (one container we restarted reclaimed 35 GiB after 5 days of varied sequence
+  shapes).
+</div>
+
+<footer>
+  Source: <a href="https://github.com/YpS-YpS/gaudi-images-port">github.com/YpS-YpS/gaudi-images-port</a> ·
+  Battle-tested on Dell PowerEdge XE9680, 8× Intel Gaudi 3 (HL-325), Intel Habana ·
+  Not affiliated with Intel/Habana/Google/RedHat/Qwen/MiniMax/OpenAI/Anthropic.
+</footer>
+
+</div>
+</body>
+</html>

@@ -61,6 +61,18 @@ start() {
   local CONTAINER="vllm-$preset"
   local IMAGE="${PRESET_IMAGE:-$DEFAULT_IMAGE}"
 
+  # Env overrides (used by launchpad.sh + ad-hoc invocations):
+  #   LAUNCH_DEVICES="0,1"   → override card selection (TP auto-derives from count)
+  #   LAUNCH_PORT=8500       → override port (for conflict avoidance)
+  if [[ -n "${LAUNCH_DEVICES:-}" ]]; then
+    DEVICES="$LAUNCH_DEVICES"
+    TP=$(awk -F',' '{print NF}' <<<"$DEVICES")
+    CONTAINER="vllm-$preset-c${DEVICES//,/_}"
+  fi
+  if [[ -n "${LAUNCH_PORT:-}" ]]; then
+    PORT="$LAUNCH_PORT"
+  fi
+
   # Thinking variants: parse <think>...</think> server-side so the OpenAI-compat
   # response has a separate reasoning_content field. Open WebUI then renders it
   # as a collapsible "Thinking" block instead of inline-mixed with the answer.
