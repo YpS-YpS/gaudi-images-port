@@ -220,6 +220,7 @@
 <nav class="toc">
   <a href="#tldr">tl;dr</a> ·
   <a href="#models">models</a> ·
+  <a href="#tp-math">TP math</a> ·
   <a href="#patches">patches</a> ·
   <a href="#layout">layout</a> ·
   <a href="#manual">manual run</a> ·
@@ -415,6 +416,97 @@ scripts/smoke.sh http://localhost:8006 minimax-m2</code></pre>
 vllm-launch minimax-m2.7
 scripts/smoke.sh http://localhost:8006 minimax-m2.7</code></pre>
 </div>
+
+<h2 id="tp-math">📐 Scaling math — why MiniMax can't run at TP=6</h2>
+
+<p>When I tried to scale MiniMax to 6 Gaudis (after freeing the Qwen cards),
+the answer was <strong>no</strong> — but not because of HBM. It's a hard
+mathematical constraint baked into the model architecture. This is worth
+documenting because the same logic applies to <em>any</em> tensor-parallel
+sharding decision on this box.</p>
+
+<h3>The rule</h3>
+
+<p>vLLM (both upstream and the HPU path) requires <strong>every per-layer
+parallelizable dimension</strong> to be evenly divisible by the
+tensor-parallel size <code>TP</code>. For an MoE model like MiniMax, that means three
+constraints, all of which must hold simultaneously:</p>
+
+<pre><code><span style="color:var(--dim);"># Constraint 1 — attention sharding</span>
+num_attention_heads  mod  TP  ==  0
+
+<span style="color:var(--dim);"># Constraint 2 — KV cache sharding (the binding one for MiniMax)</span>
+num_key_value_heads  mod  TP  ==  0
+
+<span style="color:var(--dim);"># Constraint 3 — expert sharding</span>
+num_local_experts    mod  TP  ==  0</code></pre>
+
+<p>If any one fails, vLLM refuses to load the model — it can't split the
+weights cleanly across cards.</p>
+
+<h3>The numbers (read straight from <code>config.json</code>)</h3>
+
+<table class="cheat">
+<thead><tr><th>Field</th><th>MiniMax M2</th><th>MiniMax M2.7</th><th>Divisors ≤ 8</th></tr></thead>
+<tbody>
+<tr><td><code>num_attention_heads</code></td><td>48</td><td>48</td><td class="mono">{1, 2, 3, 4, 6, 8}</td></tr>
+<tr><td><code>num_key_value_heads</code></td><td class="mono" style="color:var(--red);">8</td><td class="mono" style="color:var(--red);">8</td><td class="mono">{1, 2, 4, 8} ← <strong>binding</strong></td></tr>
+<tr><td><code>num_local_experts</code></td><td>128</td><td>256</td><td class="mono">{1, 2, 4, 8}</td></tr>
+<tr><td><code>hidden_size</code></td><td>3072</td><td>3072</td><td class="mono">{1, 2, 3, 4, 6, 8}</td></tr>
+</tbody></table>
+
+<p>Taking the intersection of <em>all three</em> constraints — the set of TPs
+that divide <strong>every</strong> required dimension:</p>
+
+<pre><code>valid TP = divisors(48) ∩ divisors(8) ∩ divisors(128 <span style="color:var(--dim);">or 256</span>)
+         = {1, 2, 3, 4, 6, 8} ∩ {1, 2, 4, 8} ∩ {1, 2, 4, 8, …}
+         = <strong style="color:var(--green);">{1, 2, 4, 8}</strong></code></pre>
+
+<div class="callout danger">
+  <strong>TP=6 fails because 8 KV heads ÷ 6 cards = 1.33.</strong> Each card
+  would have to hold 1.33 KV heads, which is not a whole number — vLLM
+  can't split that. The same applies to TP=3, 5, 7.
+</div>
+
+<h3>What that means for the 8-card box</h3>
+
+<p>On 8 Gaudi 3 cards, MiniMax can only be run at one of these scales:</p>
+
+<table class="cheat">
+<thead><tr><th>TP</th><th>Cards used</th><th>Weights / card (M2.7, 230 GB)</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><strong>1</strong></td><td>1</td><td>~230 GB</td><td class="broken">Doesn't fit (128 GiB HBM)</td></tr>
+<tr><td><strong>2</strong></td><td>2</td><td>~115 GB</td><td class="broken">Fits weights but no room for KV cache (~75 GB) + graph reserve (~21 GB) on a 128 GiB card</td></tr>
+<tr><td><strong>4</strong></td><td>4</td><td>~58 GB</td><td>✓ The default. ~101 GB/card steady-state with tightened knobs.</td></tr>
+<tr><td><strong>6</strong></td><td>6</td><td>—</td><td class="broken">Invalid — KV head split fails</td></tr>
+<tr><td><strong>8</strong></td><td>8 (full box)</td><td>~29 GB</td><td>✓ Maximum throughput, but takes the whole box. Stops Gemma 4 on Gaudis 2/3 + anything on 0/1.</td></tr>
+</tbody></table>
+
+<h3>The other dimensions are slack</h3>
+
+<p>Note that <code>num_attention_heads = 48</code> would have allowed TPs of 3, 6, 12,
+16, 24, 48 — many more options. <code>num_local_experts = 256</code> allows 16, 32, 64,
+128, 256. So the <strong>binding constraint is always
+<code>num_key_value_heads = 8</code></strong> on MiniMax — that's what cuts the option set
+down to {1, 2, 4, 8}.</p>
+
+<p>If MiniMax ever ships a variant with 16 or 32 KV heads, we could run TP=6
+(among others) without issue. Until then, "scale up" on this model means
+TP=4 → TP=8, no intermediate stops.</p>
+
+<h3>How to check this for any model yourself</h3>
+
+<pre><code><span style="color:var(--dim);"># quick TP-validity check from a HuggingFace config.json</span>
+python3 -c '
+import json, sys
+c = json.load(open(sys.argv[1]))
+kv  = c.get("num_key_value_heads")
+ah  = c.get("num_attention_heads")
+exp = c.get("num_local_experts", float("inf"))
+valid = [tp for tp in (1,2,3,4,5,6,7,8) if (kv%tp==0 and ah%tp==0 and (exp==float("inf") or exp%tp==0))]
+print(f"kv_heads={kv}, attn_heads={ah}, experts={exp}")
+print(f"valid TP ≤ 8: {valid}")
+' /home/satyajit-gaudi/hf-cache/hub/models--MiniMaxAI--MiniMax-M2/snapshots/*/config.json</code></pre>
 
 <div class="model-card broken">
   <h3>gpt-oss-120b / gpt-oss-20b <span class="tag red">BROKEN</span></h3>
