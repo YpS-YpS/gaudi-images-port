@@ -20,7 +20,8 @@ docs/wiki/
 ├── 05-tools.md                    ← every script in bin/ and scripts/ — what each does
 ├── 06-debugging-playbook.md       ← symptom → cause → fix
 ├── 07-gotchas.md                  ← non-obvious surprises that cost time
-└── 08-history.md                  ← chronological "what we tried, what we learned"
+├── 08-history.md                  ← chronological "what we tried, what we learned"
+└── 09-future-roadmap.md           ← open-weight agentic leaderboard + 5-box fleet plan
 ```
 
 ## How this fits with the rest of the docs

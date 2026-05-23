@@ -86,6 +86,7 @@ That prints the card matrix + running endpoints in one screen.
 | Debug a symptom | [06-debugging-playbook.md](06-debugging-playbook.md) |
 | Avoid a known trap | [07-gotchas.md](07-gotchas.md) |
 | Know what's been tried before (and didn't work) | [08-history.md](08-history.md) |
+| Plan for new boxes / pick next models to deploy | [09-future-roadmap.md](09-future-roadmap.md) — open-weight agentic leaderboard + 5-box fleet plan |
 
 ## User preferences (saved in `~/.claude/memory/`)
 
