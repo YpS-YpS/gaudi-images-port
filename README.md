@@ -20,6 +20,87 @@ fresh Ubuntu 24.04 box
 
 ---
 
+## Why this repo exists
+
+> Bringing Intel Gaudi 3 up from scratch is **a multi-week engineering grind**
+> the first time you do it. This repo is the second time — packaged so
+> nobody else has to spend weeks rediscovering the same set of gotchas.
+
+What follows is a partial list of things you would otherwise hit, in roughly
+the order they bite you. Each one cost real time. `bootstrap.sh` and the
+derived image silently fix all of them.
+
+### Kernel & driver layer
+
+- **Ubuntu 24.04's default kernel doesn't compile the Habana driver.** Pin to
+  `6.8.0-110-generic` or the build silently fails partway through. Newer
+  kernels look like they'll work — they don't.
+- **Without `iommu=pt intel_iommu=on` in GRUB**, the kernel page-table corrupts
+  the moment the driver maps device memory. You get "Bad pagetable" oopses
+  that look unrelated to the driver.
+- **`ib_uverbs` doesn't autoload.** Result: the 24 internal Gaudi scale-out
+  NICs silently stay down and TP>1 fails with cryptic comm errors. The fix
+  is one `modules-load.d` file, but finding it took days.
+- **Sapphire Rapids defaults throttle MME throughput.** You need
+  `IA32_ENERGY_PERF_BIAS=0` and `HWP_REQUEST=max` MSRs pinned on every boot.
+- **Hugepages formula is undocumented.** Habana's installer wants
+  `vm.nr_hugepages=24640` (2 MiB pages); allocations fail under load without it.
+
+### vLLM image hunt
+
+- **`vllm-0.17.1-ptupstream` has a graph-capture bug** that requires
+  `--enforce-eager` (kills throughput). Switching to `ptfork` was an
+  undocumented step. Roughly 2× faster after.
+- **Without `PT_HPUGRAPH_DISABLE_TENSOR_CACHE=false`**, the recipe cache
+  poisons on Qwen graph capture and the process dies with
+  `ValidateSyncInputTensors`. The fix is one env var. Finding it: ~a week
+  of debugging.
+
+### Gemma 4 — the 5-patch saga
+
+vLLM 0.19 introduced `UniformTypeKVCacheSpecs` to support models with
+heterogeneous attention-head dimensions (Gemma 4 alternates head_dim=256 and
+head_dim=512). `vllm-gaudi 0.19` shipped without handlers for it — so Gemma 4
+fails with **5 distinct errors depending on which subsystem hits the wrapper
+first.** Closing all five took ~2 weeks of patching. They're now in the
+derived image `gaudi-vllm-gemma4:0.19.0`. Deep-dive: [docs/GEMMA4.md](docs/GEMMA4.md).
+
+### MoE-specific surprises
+
+- **235B-A22B has chronic HBM fragmentation** under sustained inference. We
+  saw the same model OOM after 5 days of fine, even though `hl-smi` reported
+  the same allocation. Mitigated with `--gpu-memory-utilization 0.80` +
+  `HABANA_PGM_LRU_MAX=60000` + `--restart unless-stopped`. Took weeks of
+  observation to characterize.
+- **MiniMax M2.7's cold load is CPU-bound and silent for ~30 minutes** before
+  HBM takes off. We almost killed the container twice thinking it was hung.
+  The real signal is `docker stats <c>`'s `BLOCK I/O` column climbing.
+- **gpt-oss family loads but produces incoherent output.** We narrowed it down
+  to Habana's closed-source HPU MoE kernel — not fixable from user-space.
+  Documented for upstream, with reproducer, in [docs/GPT-OSS.md](docs/GPT-OSS.md).
+
+### The constraint nobody mentions
+
+**Tensor parallel must divide `num_key_value_heads`.** MiniMax has 8 KV heads,
+so valid TP ∈ {1, 2, 4, 8}. Try TP=6 and you get a cryptic load-time error.
+This is hours of head-scratching if you don't know the math going in.
+([docs/wiki/04-constraints.md](docs/wiki/04-constraints.md) has the worked example.)
+
+### What this repo does
+
+One command — `sudo ./bootstrap.sh --with-gemma4` — applies **every fix above**,
+pulls both vLLM base images, builds the derived Gemma 4 image, downloads the
+models, and brings up a working multi-model serving stack in 30-60 minutes.
+
+That's **weeks of engineering compressed into one script.** Plus a curated
+documentation tree ([docs/wiki/](docs/wiki/)) so the next person picking up a
+Gaudi 3 box can skip the painful path entirely.
+
+If you've found this repo and you have a Gaudi 3 box: you should not need to
+rediscover any of it. That's the whole point.
+
+---
+
 ## tl;dr — one-click on a fresh box
 
 ```bash
