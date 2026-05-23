@@ -266,6 +266,7 @@ for MiniMax).
 
 | Doc | When to read it |
 |---|---|
+| **[docs/wiki/](docs/wiki/)** | **Onboarding wiki** — start here if you're new to this box. Tree of 10 files covering everything: hardware, models, patches, constraints, tools, debugging playbook, gotchas, history. |
 | **[docs/MODELS.md](docs/MODELS.md)** | Per-model patches, flags, performance notes, how to add a new preset |
 | **[docs/GEMMA4.md](docs/GEMMA4.md)** | Deep-dive on the 5 patches required for Gemma 4 on vllm-gaudi 0.19 |
 | **[docs/MINIMAX.md](docs/MINIMAX.md)** | MiniMax M2 + M2.7 — handcrafted HPU class, 256-expert/MTP quirks, Anthropic + parallel tools |

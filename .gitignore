@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 .env
 .DS_Store
+
+# /export'd conversation transcripts may contain credentials — never commit
+gaudi_research*.txt
+*.export.txt
