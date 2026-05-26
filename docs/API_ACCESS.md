@@ -8,7 +8,7 @@ single reference for **how to call them from your other machines**.
 
 | | |
 |---|---|
-| LAN IP | `10.234.184.59` (eno8303) |
+| LAN IP | `XXXXXXXXXXXX` (eno8303) |
 | Hostname | `satyajit-gaudi-PowerEdge-XE9680` (corp DNS may also resolve) |
 | Network | Intel corporate LAN, behind `proxy-dmz.intel.com:912` for outbound |
 | Firewall | `ufw inactive`, `iptables INPUT=ACCEPT` — nothing blocks inbound |
