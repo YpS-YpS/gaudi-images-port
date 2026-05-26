@@ -10,7 +10,7 @@ single reference for **how to call them from your other machines**.
 |---|---|
 | LAN IP | `XXXXXXXXXXXX` (eno8303) |
 | Hostname | `satyajit-gaudi-PowerEdge-XE9680` (corp DNS may also resolve) |
-| Network | Intel corporate LAN, behind `proxy-dmz.intel.com:912` for outbound |
+| Network |  for outbound |
 | Firewall | `ufw inactive`, `iptables INPUT=ACCEPT` — nothing blocks inbound |
 | TLS | none — plain HTTP |
 | Auth | none — vLLM is open (LAN-only context) |
@@ -19,17 +19,17 @@ single reference for **how to call them from your other machines**.
 
 ```
 ┌──────┬─────────────────────────────────────────┬──────────┬─────────┐
-│ PORT │ SERVED MODEL                             │ GAUDI(S) │ STEADY  │
+│ PORT │ SERVED MODEL                             │ GAUDI(S) │ STEADY │
 ├──────┼─────────────────────────────────────────┼──────────┼─────────┤
-│ 8000 │ qwen3-vl-32b-thinking                    │ 0        │ ~48 t/s │
-│ 8001 │ qwen3-vl-32b-instruct                    │ 1        │ ~49 t/s │
-│ 8004 │ qwen3-vl-235b-tp4 (235B-A22B-Thinking)   │ 4,5,6,7  │ ~23 t/s │
-│ 3000 │ Open WebUI (chat front-end)              │ -        │ -       │
+│ 8    │ qwen3-vl-32b-thinking                    │ 0        │ ~48 t/s │
+│ 8    │ qwen3-vl-32b-instruct                    │ 1        │ ~49 t/s │
+│ 8    │ qwen3-vl-235b-tp4 (235B-A22B-Thinking)   │ 4,5,6,7  │ ~23 t/s │
+│ 3    │ Open WebUI (chat front-end)              │ -        │ -       │
 └──────┴─────────────────────────────────────────┴──────────┴─────────┘
 
 All endpoints bind to 0.0.0.0 — reachable from any LAN client.
    http://localhost:<port>          from this box
-   http://10.234.184.59:<port>      from any LAN client
+   http://<ip>:<port>               from any LAN client
 ```
 
 Every vLLM endpoint serves the standard OpenAI API surface:
@@ -53,7 +53,7 @@ Below: copy-paste ready snippets for each.
 ### 1. `qwen3-vl-32b-instruct`  →  port **8001**, Gaudi **1**
 
 ```
-URL                    http://10.234.184.59:8001/v1
+URL                    http://<ip>/v1
 served model name      qwen3-vl-32b-instruct
 HF ID                  Qwen/Qwen3-VL-32B-Instruct-FP8
 type                   dense 32B, FP8, vision-language
@@ -67,7 +67,7 @@ best for               fast tool dispatch, scripted automation, quick Q&A
 
 **curl — text:**
 ```bash
-curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -s -X POST http://<ip>:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-vl-32b-instruct",
        "messages":[{"role":"user","content":"hello"}],
@@ -77,7 +77,7 @@ curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
 **curl — vision (drag any PNG into the data URL):**
 ```bash
 B64=$(base64 -w0 game_screen.png)
-curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -s -X POST http://<ip>:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d "{\"model\":\"qwen3-vl-32b-instruct\",
        \"messages\":[{\"role\":\"user\",\"content\":[
@@ -88,7 +88,7 @@ curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
 
 **curl — parallel tool calls:**
 ```bash
-curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -s -X POST http://<ip>:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model":"qwen3-vl-32b-instruct",
@@ -102,7 +102,7 @@ curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
 **Python:**
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://10.234.184.59:8001/v1", api_key="dummy")
+client = OpenAI(base_url="http://<ip>:8001/v1", api_key="dummy")
 resp = client.chat.completions.create(
     model="qwen3-vl-32b-instruct",
     messages=[{"role":"user","content":"hello"}],
@@ -116,7 +116,7 @@ print(resp.choices[0].message.content)
 ### 2. `qwen3-vl-32b-thinking`  →  port **8000**, Gaudi **0**
 
 ```
-URL                    http://10.234.184.59:8000/v1
+URL                    http://<ip>9:8000/v1
 served model name      qwen3-vl-32b-thinking
 HF ID                  Qwen/Qwen3-VL-32B-Thinking-FP8
 type                   dense 32B, FP8, vision-language
@@ -132,7 +132,7 @@ best for               problems where you want CoT visible (debugging,
 
 **curl — text (note the bigger max_tokens to fit `<think>`):**
 ```bash
-curl -s -X POST http://10.234.184.59:8000/v1/chat/completions \
+curl -s -X POST http://<ip>9:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-vl-32b-thinking",
        "messages":[{"role":"user","content":"why is the sky blue?"}],
@@ -163,7 +163,7 @@ the reasoning preamble doesn't cut off the tool call.
 ### 3. `qwen3-vl-235b-tp4`  →  port **8004**, Gaudis **4-7** (tensor-parallel ×4)
 
 ```
-URL                    http://10.234.184.59:8004/v1
+URL                    http://<ip>9:8004/v1
 served model name      qwen3-vl-235b-tp4
 HF ID                  Qwen/Qwen3-VL-235B-A22B-Thinking-FP8
 type                   MoE 235B total / 22B active, FP8, vision-language
@@ -178,7 +178,7 @@ best for               hard games, complex UIs, when 32B gets it wrong;
 
 **curl is identical to 32B — only `model` and port change:**
 ```bash
-curl -s -X POST http://10.234.184.59:8004/v1/chat/completions \
+curl -s -X POST http://<ip>9:8004/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-vl-235b-tp4",
        "messages":[{"role":"user","content":"hard problem here"}],
@@ -205,7 +205,7 @@ for chunk in stream:
 
 ```bash
 # curl streaming
-curl -N -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -N -X POST http://<ip>9:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-vl-32b-instruct",
        "messages":[{"role":"user","content":"hi"}],
@@ -216,7 +216,7 @@ curl -N -X POST http://10.234.184.59:8001/v1/chat/completions \
 
 ### Switching model mid-conversation (Open WebUI does this for you)
 
-The dropdown in Open WebUI at `http://10.234.184.59:3000` lists all 3
+The dropdown in Open WebUI at `http://<ip>9:3000` lists all 3
 served names. Switch any time — context stays in the chat thread.
 
 If you want to switch programmatically: just change `base_url` + `model`
@@ -237,10 +237,10 @@ in your client. Each endpoint is independent.
 
 ```bash
 # 1. list model
-curl -s http://10.234.184.59:8001/v1/models | python3 -m json.tool
+curl -s http://<ip>9:8001/v1/models | python3 -m json.tool
 
 # 2. text completion
-curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -s -X POST http://<ip>9:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-vl-32b-instruct",
        "messages":[{"role":"user","content":"What is 17 * 89?"}],
@@ -248,7 +248,7 @@ curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
 
 # 3. vision (base64 PNG inline)
 B64=$(base64 -w0 your_image.png)
-curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -s -X POST http://<ip>9:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-vl-32b-instruct",
        "messages":[{"role":"user","content":[
@@ -257,7 +257,7 @@ curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
        ]}],"max_tokens":300}'
 
 # 4. parallel tool calling
-curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -s -X POST http://<ip>9:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model":"qwen3-vl-32b-instruct",
@@ -275,7 +275,7 @@ curl -s -X POST http://10.234.184.59:8001/v1/chat/completions \
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://10.234.184.59:8001/v1",   # pick endpoint
+    base_url="http://<ip>9:8001/v1",   # pick endpoint
     api_key="dummy",                            # vLLM doesn't check; field is required
 )
 
@@ -355,7 +355,7 @@ tool calls, otherwise reasoning eats your token budget before the call lands.
 
 | | |
 |---|---|
-| URL | http://10.234.184.59:3000 |
+| URL | http://<ip>9:3000 |
 | Auth | disabled (`WEBUI_AUTH=false`) — anyone on LAN can use |
 | Backend | wired to all 3 vLLM endpoints; model dropdown auto-populates |
 | Persistent | conversations + settings stored in docker volume `open-webui-data` |
@@ -371,13 +371,13 @@ on the LAN. No client setup needed.
 gaudi_api:
   endpoints:
     fast:        # for most games / quick decisions
-      url:    http://10.234.184.59:8001/v1
+      url:    http://<ip>9:8001/v1
       model:  qwen3-vl-32b-instruct
     reasoning:   # when you want the <think> trace
-      url:    http://10.234.184.59:8000/v1
+      url:    http://<ip>9:8000/v1
       model:  qwen3-vl-32b-thinking
     hard:        # frontier brain for stuck games
-      url:    http://10.234.184.59:8004/v1
+      url:    http://<ip>9:8004/v1
       model:  qwen3-vl-235b-tp4
   api_key: dummy
 
@@ -426,16 +426,16 @@ def plan_step(screenshot_path: str, goal: str, role="fast"):
 
 ```bash
 # liveness
-curl -fs http://10.234.184.59:8001/health    # 200 OK if healthy
+curl -fs http://<ip>9:8001/health    # 200 OK if healthy
 
 # functional check (will exercise actual decode path)
-curl -fs -m 10 -X POST http://10.234.184.59:8001/v1/chat/completions \
+curl -fs -m 10 -X POST http://<ip>9:8001/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-vl-32b-instruct","messages":[{"role":"user","content":"ping"}],"max_tokens":3}' \
   | grep -q 'choices' && echo OK || echo FAIL
 
 # Prometheus metrics endpoint
-curl -fs http://10.234.184.59:8001/metrics
+curl -fs http://<ip>9:8001/metrics
 ```
 
 ## Hardening checklist (not done yet — required if exposing beyond corp LAN)
