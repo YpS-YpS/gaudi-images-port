@@ -465,50 +465,88 @@
   #splash.hide { opacity: 0; visibility: hidden; }
 
   .splash-mark {
-    position: relative; width: 110px; height: 110px;
+    position: relative; width: 120px; height: 120px;
     display: grid; place-items: center;
   }
-  .splash-mark .hex {
-    position: absolute; inset: 0;
-    border: 2px solid rgba(185,108,255,0.5);
-    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
-    animation: hex-spin 4s linear infinite;
-    box-shadow: 0 0 30px rgba(185,108,255,0.35) inset, 0 0 28px rgba(185,108,255,0.35);
+  /* The float wrapper carries the translateY for both the hex outline and the
+     core square, so they bob together. The hex's own rotation is applied to
+     the SVG inside (transforms don't compose across two elements, so we need
+     this two-layer split). */
+  .splash-mark .splash-float {
+    position: relative;
+    width: 100%; height: 100%;
+    display: grid; place-items: center;
+    animation: float 3s ease-in-out infinite;
   }
-  .splash-mark .hex.outer {
-    inset: -16px;
-    border-color: rgba(255,108,240,0.35);
-    animation-duration: 6s;
-    animation-direction: reverse;
-    box-shadow: 0 0 22px rgba(255,108,240,0.25);
+  /* Real hexagonal outline via SVG <polygon> — the stroke follows the actual
+     6 sides, so no "broken" look from clip-path clipping a rectangular border.
+     Rotation pauses briefly at every 60° edge → ticking, mechanical feel. */
+  .splash-mark .hex-outline {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    animation: hex-spin 6s cubic-bezier(.55,.0,.45,1) infinite;
+    filter: drop-shadow(0 0 6px rgba(108, 220, 255, 0.70))
+            drop-shadow(0 0 16px rgba(108, 220, 255, 0.40));
+    transform-origin: 50% 50%;
   }
   .splash-mark .core {
-    width: 64px; height: 64px;
-    border-radius: 18px;
-    background: linear-gradient(135deg, #b96cff, #ff6cf0);
+    width: 56px; height: 56px;
+    border-radius: 8px;
+    background: #6cdcff;     /* solid cyan, no gradient */
     display: grid; place-items: center;
-    color: #2a0658; font-weight: 800; font-size: 30px;
-    box-shadow: 0 0 60px rgba(185,108,255,0.65),
-                0 0 120px rgba(255,108,240,0.35);
-    animation: float 3s ease-in-out infinite, core-glow 2.4s ease-in-out infinite;
+    color: #042a3e; font-weight: 800; font-size: 26px;
+    box-shadow: 0 0 28px rgba(108, 220, 255, 0.70),
+                0 0 56px rgba(108, 220, 255, 0.35);
   }
-  @keyframes hex-spin { to { transform: rotate(360deg); } }
-  @keyframes float    { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-  @keyframes core-glow {
-    0%,100% { box-shadow: 0 0 60px rgba(185,108,255,0.65), 0 0 120px rgba(255,108,240,0.35); }
-    50%     { box-shadow: 0 0 90px rgba(185,108,255,0.9),  0 0 180px rgba(255,108,240,0.55); }
+  @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  /* 6-step rotation: spin 60° in ~0.8 s, hold for ~0.2 s, repeat × 6 = 6 s
+     full revolution. The hold lands exactly on each hexagonal symmetry. */
+  @keyframes hex-spin {
+    0%    { transform: rotate(0deg);   }
+    13.3% { transform: rotate(60deg);  }
+    16.6% { transform: rotate(60deg);  }
+    30%   { transform: rotate(120deg); }
+    33.3% { transform: rotate(120deg); }
+    46.6% { transform: rotate(180deg); }
+    50%   { transform: rotate(180deg); }
+    63.3% { transform: rotate(240deg); }
+    66.6% { transform: rotate(240deg); }
+    80%   { transform: rotate(300deg); }
+    83.3% { transform: rotate(300deg); }
+    96.6% { transform: rotate(360deg); }
+    100%  { transform: rotate(360deg); }
   }
 
   .splash-title {
-    font-size: 30px; font-weight: 700; letter-spacing: 4px;
-    background: linear-gradient(90deg, #ffffff, var(--accent-1), var(--accent-2));
+    font-size: 48px; font-weight: 800; letter-spacing: 6px;
+    background: linear-gradient(90deg, #ffffff, #6cdcff, #67e8f9);
     -webkit-background-clip: text; background-clip: text; color: transparent;
-    text-shadow: 0 0 40px rgba(185,108,255,0.45);
+    /* Layered cyan halo + subtle 3 s pulse so the glow visibly breathes. */
+    text-shadow:
+      0 0 22px rgba(108, 220, 255, 0.85),
+      0 0 48px rgba(108, 220, 255, 0.60),
+      0 0 96px rgba(108, 220, 255, 0.35);
+    animation: title-glow 3s ease-in-out infinite;
+  }
+  @keyframes title-glow {
+    0%, 100% {
+      text-shadow:
+        0 0 22px rgba(108, 220, 255, 0.85),
+        0 0 48px rgba(108, 220, 255, 0.60),
+        0 0 96px rgba(108, 220, 255, 0.35);
+    }
+    50% {
+      text-shadow:
+        0 0 30px rgba(108, 220, 255, 1.0),
+        0 0 60px rgba(108, 220, 255, 0.80),
+        0 0 130px rgba(168, 240, 255, 0.55);
+    }
   }
   .splash-sub {
     font-size: 11px; font-weight: 600; letter-spacing: 4px;
-    color: var(--muted); text-transform: uppercase;
+    color: #9ee5ff; text-transform: uppercase;
     display: inline-flex; gap: 2px; align-items: baseline;
+    text-shadow: 0 0 12px rgba(108, 220, 255, 0.45);
   }
   .splash-sub .dots::after {
     content: '';
@@ -522,20 +560,48 @@
     75%  { content: '...'; }
     100% { content: ''; }
   }
+
+  /* Glowy flow-bar — multi-tone cyan→teal→white gradient is 2.5× wide and
+     scrolls continuously, while the bar fills from 0 → 100% over 2.7 s.
+     Multiple stacked box-shadows create a layered cyan halo so the bar
+     looks like a glowing light beam, not a flat stripe. */
   .splash-bar {
-    width: 260px; height: 3px;
-    background: rgba(185,108,255,0.15);
+    width: 320px; height: 6px;
+    background: rgba(108, 220, 255, 0.10);
     border-radius: 999px;
     overflow: hidden;
-    box-shadow: inset 0 0 0 1px rgba(185,108,255,0.18);
+    box-shadow:
+      inset 0 0 0 1px rgba(108, 220, 255, 0.40),
+      0 0 28px rgba(108, 220, 255, 0.35);
   }
   .splash-bar > i {
     display: block; height: 100%; width: 0;
-    background: linear-gradient(90deg, var(--accent-1), var(--accent-2), var(--accent-3));
-    box-shadow: 0 0 14px var(--accent-1);
-    animation: fill 2.7s cubic-bezier(.4,0,.2,1) forwards;
+    background: linear-gradient(
+      90deg,
+      #2dd4ff  0%,
+      #6cdcff 18%,
+      #a8f0ff 35%,
+      #ffffff 50%,
+      #a8f0ff 65%,
+      #6cdcff 82%,
+      #2dd4ff 100%
+    );
+    background-size: 250% 100%;
+    box-shadow:
+      0 0 12px #ffffff,
+      0 0 22px #a8f0ff,
+      0 0 36px #6cdcff,
+      0 0 64px rgba(108, 220, 255, 0.85),
+      0 0 96px rgba(108, 220, 255, 0.45);
+    animation:
+      fill 2.7s cubic-bezier(.4,0,.2,1) forwards,
+      flow 1.1s linear infinite;
   }
   @keyframes fill { to { width: 100%; } }
+  @keyframes flow {
+    0%   { background-position: 250% 0; }
+    100% { background-position: -250% 0; }
+  }
 
   /* ---------- staggered section reveal ----------
      NOTE: we clear `transform` back to `none` (not translateY(0)) once the
@@ -561,9 +627,14 @@
 
 <div id="splash" aria-hidden="true">
   <div class="splash-mark">
-    <div class="hex outer"></div>
-    <div class="hex"></div>
-    <div class="core">⬢</div>
+    <div class="splash-float">
+      <svg class="hex-outline" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <polygon points="60,10 103,35 103,85 60,110 17,85 17,35"
+                 fill="none" stroke="#6cdcff" stroke-width="2.5"
+                 stroke-linejoin="round" stroke-linecap="round" />
+      </svg>
+      <div class="core">⬢</div>
+    </div>
   </div>
   <div class="splash-title">GAUDI3 · POWER GRID</div>
   <div class="splash-sub">CALCULATING TELEMETRY<span class="dots"></span></div>
@@ -725,6 +796,12 @@
 <script src="/static/echarts.min.js"></script>
 <script>
 (function() {
+  // Don't let the browser restore the previous scroll position when the page
+  // reloads — the splash hides the real scroll location, so users would land
+  // mid-dashboard after the reveal.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  window.scrollTo(0, 0);
+
   // -------- palette --------
   const PURPLE = '#b96cff';
   const PINK   = '#ff6cf0';
@@ -1434,14 +1511,22 @@
   const firstFetch = refresh();
   setTimeout(async () => {
     try { await firstFetch; } catch (_) { /* ignore */ }
+    // Snap back to the top before the reveals start so the first card is
+    // what the user actually sees — not a mid-page chart band caused by
+    // any pre-splash layout / scroll drift.
+    window.scrollTo(0, 0);
     document.getElementById('splash').classList.add('hide');
     const sections = document.querySelectorAll('.reveal');
     sections.forEach((el, i) => {
       setTimeout(() => el.classList.add('show'), 80 + i * STAGGER_MS);
     });
-    // Now that the layout is settling, force a chart resize so they fill the
-    // freshly-revealed cards correctly.
-    setTimeout(() => window.dispatchEvent(new Event('resize')), 80 + sections.length * STAGGER_MS + 400);
+    // After everything settles, force a chart resize so they fill the
+    // freshly-revealed cards correctly, then re-pin scroll to the top in
+    // case the resize shifted the layout height.
+    setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+      window.scrollTo(0, 0);
+    }, 80 + sections.length * STAGGER_MS + 400);
   }, SPLASH_MS);
 
   setInterval(refresh, 5000);
