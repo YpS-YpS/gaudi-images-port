@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# hl-power — convenience wrapper around the two systemd user units.
+# Usage:
+#   hl-power up       | start          # start both
+#   hl-power down     | stop           # stop both
+#   hl-power restart                   # restart both
+#   hl-power status                    # status of both
+#   hl-power logs                      # tail both journals (logger | server)
+#   hl-power up   logger | server      # start just one
+#   hl-power down logger | server      # stop just one
+#   hl-power logs logger | server      # tail just one
+#
+# Examples:
+#   hl-power up
+#   hl-power status
+#   hl-power logs server
+set -euo pipefail
+
+LOGGER=hl-power-logger.service
+SERVER=hl-power-server.service
+
+bold() { printf '\033[1m%s\033[0m' "$*"; }
+dim()  { printf '\033[2m%s\033[0m' "$*"; }
+ok()   { printf '\033[32m%s\033[0m' "$*"; }
+err()  { printf '\033[31m%s\033[0m' "$*"; }
+
+resolve_units() {
+  case "${1:-both}" in
+    logger|log)  echo "$LOGGER" ;;
+    server|web)  echo "$SERVER" ;;
+    both|all|"") echo "$LOGGER $SERVER" ;;
+    *) err "unknown target: $1"; echo >&2 "  expected: logger | server | both"; exit 2 ;;
+  esac
+}
+
+cmd_up() {
+  units=$(resolve_units "${1:-both}")
+  systemctl --user start $units
+  echo "$(ok '✓') started: $(bold "$units")"
+  systemctl --user --no-pager is-active $units | sed "s/^/  /"
+}
+
+cmd_down() {
+  units=$(resolve_units "${1:-both}")
+  systemctl --user stop $units
+  echo "$(ok '✓') stopped: $(bold "$units")"
+}
+
+cmd_restart() {
+  units=$(resolve_units "${1:-both}")
+  systemctl --user restart $units
+  echo "$(ok '✓') restarted: $(bold "$units")"
+}
+
+cmd_status() {
+  units=$(resolve_units "${1:-both}")
+  for u in $units; do
+    state=$(systemctl --user is-active "$u" || true)
+    enabled=$(systemctl --user is-enabled "$u" || true)
+    pid=$(systemctl --user show -p MainPID --value "$u")
+    since=$(systemctl --user show -p ActiveEnterTimestamp --value "$u")
+    printf "%-30s  %s  %s  pid=%s  since=%s\n" \
+      "$u" \
+      "$([ "$state" = active ] && ok "$state" || err "$state")" \
+      "$(dim "[$enabled]")" \
+      "$pid" \
+      "$(dim "$since")"
+  done
+  # If the server is up, show the LAN URL
+  if systemctl --user is-active --quiet "$SERVER"; then
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    port=$(systemctl --user show -p Environment --value "$SERVER" \
+      | tr ' ' '\n' | awk -F= '/^HL_POWER_PORT/{print $2}')
+    port=${port:-9090}
+    echo
+    echo "  $(bold dashboard:) http://$ip:$port"
+  fi
+}
+
+cmd_logs() {
+  target=${1:-both}
+  units=$(resolve_units "$target")
+  # -f follow; -n recent lines; pass through to journalctl
+  if [ "$(echo "$units" | wc -w)" -gt 1 ]; then
+    journalctl --user -u "$LOGGER" -u "$SERVER" -n 60 -f
+  else
+    journalctl --user -u "$units" -n 60 -f
+  fi
+}
+
+case "${1:-}" in
+  up|start)         shift; cmd_up      "${1:-both}" ;;
+  down|stop)        shift; cmd_down    "${1:-both}" ;;
+  restart)          shift; cmd_restart "${1:-both}" ;;
+  status|st|"")     shift || true; cmd_status "${1:-both}" ;;
+  logs|log|tail)    shift; cmd_logs    "${1:-both}" ;;
+  -h|--help|help)
+    sed -n '2,18p' "$0"
+    ;;
+  *) err "unknown command: $1"; echo; sed -n '2,18p' "$0"; exit 2 ;;
+esac
