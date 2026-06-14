@@ -1,0 +1,1451 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GAUDI3 ⬢ POWER GRID</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='28' fill='%2317052e'/><polygon points='32,8 54,20 54,44 32,56 10,44 10,20' fill='none' stroke='%23b96cff' stroke-width='4'/></svg>" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-0: #07021a;
+    --bg-1: #14082a;
+    --bg-2: #1d0d3f;
+    --card: rgba(34, 18, 64, 0.55);
+    --card-border: rgba(185, 108, 255, 0.22);
+    --card-border-bright: rgba(185, 108, 255, 0.55);
+    --text: #efe2ff;
+    --muted: #a892d0;
+    --dim: #7f6caa;
+    /* cool sky-cyan family for descriptive / label text — punchier than --muted */
+    --info:       #9ee5ff;   /* tile labels, card legends */
+    --info-soft:  #b8d8f0;   /* tile subtitles */
+    --info-glow:  rgba(108, 220, 255, 0.35);
+    --accent-1: #b96cff;
+    --accent-2: #ff6cf0;
+    --accent-3: #6cdcff;
+    --good: #6cffae;
+    --warn: #ffd06c;
+    --hot:  #ff6c8d;
+    --glow-strong: 0 0 32px rgba(185, 108, 255, 0.45),
+                   0 0 64px rgba(185, 108, 255, 0.18);
+    --glow-soft:  0 0 22px rgba(185, 108, 255, 0.22);
+  }
+
+  /* Single-family typography: Space Grotesk for everything, hierarchy via
+     weight + size + letter-spacing + case. Tabular numerals enabled. */
+  :root {
+    --font:      'Space Grotesk', -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
+    --font-display: var(--font);
+    --font-body:    var(--font);
+    --font-mono:    var(--font);
+  }
+  * { box-sizing: border-box; }
+  html {
+    /* base color lives on html so body can stay transparent and let the
+       blurred photo div behind it actually show through */
+    background: linear-gradient(160deg, var(--bg-0) 0%, var(--bg-1) 45%, var(--bg-2) 100%);
+    min-height: 100%;
+  }
+  body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    color: var(--text);
+    font-family: var(--font);
+    font-feature-settings: 'tnum' 1, 'cv02' 1, 'cv03' 1, 'ss01' 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+  }
+
+  /* Blurred Gaudi 3 photo backdrop. Heavy filter blur on the element itself
+     so it doesn't bleed onto siblings; over-extended so blur halos exit the
+     viewport rather than fade to dark frames. */
+  .bg-photo {
+    position: fixed; inset: 0;
+    background-image: url('/static/upscalemedia-transformed.png');
+    background-size: cover;                        /* fill the viewport, preserve aspect, crop overflow */
+    background-position: center;
+    background-repeat: no-repeat;
+    filter: none;
+    opacity: 1;
+    z-index: -3;
+    pointer-events: none;
+  }
+  /* Soft purple wash on top of the photo so it harmonises with the neon UI
+     without drowning it. */
+  .bg-tint {
+    position: fixed; inset: 0;
+    background:
+      radial-gradient(900px 600px at 12% -10%, rgba(185, 108, 255, 0.32), transparent 60%),
+      radial-gradient(900px 600px at 110% 110%, rgba(108, 220, 255, 0.22), transparent 60%),
+      radial-gradient(700px 500px at 50% 50%, rgba(255, 108, 240, 0.15), transparent 70%),
+      linear-gradient(180deg, rgba(7, 2, 26, 0.20), rgba(20, 8, 42, 0.30));
+    z-index: -2;
+    pointer-events: none;
+  }
+
+  /* faint hex/grid above tint, below content */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      linear-gradient(rgba(185,108,255,0.06) 1px, transparent 1px) 0 0 / 50px 50px,
+      linear-gradient(90deg, rgba(185,108,255,0.06) 1px, transparent 1px) 0 0 / 50px 50px;
+    mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  .wrap { position: relative; z-index: 1; padding: 26px 32px 64px; max-width: 1800px; margin: 0 auto; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 22px; gap: 24px; flex-wrap: wrap;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 14px;
+    font-family: var(--font);
+    font-weight: 700; font-size: 22px; letter-spacing: 0.5px;
+  }
+  .brand .mark {
+    width: 38px; height: 38px;
+    border-radius: 11px;
+    background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
+    box-shadow: var(--glow-strong);
+    display: grid; place-items: center;
+    color: #2a0658; font-weight: 800;
+    font-family: var(--font);
+    font-size: 19px;
+  }
+  .brand .title {
+    background: linear-gradient(90deg, #ffffff, var(--accent-1), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 0 20px rgba(185, 108, 255, 0.35);
+    font-weight: 700;
+    letter-spacing: 1px;
+  }
+  .brand .sub {
+    color: var(--dim); font-weight: 500; font-size: 12.5px;
+    margin-left: 0; margin-top: 2px;
+    letter-spacing: 0.4px;
+    font-family: var(--font);
+  }
+
+  .ranges {
+    display: flex; gap: 8px; padding: 4px;
+    background: rgba(20, 8, 42, 0.6);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    backdrop-filter: blur(14px);
+  }
+  .chip {
+    padding: 7px 14px;
+    border-radius: 10px;
+    font-family: var(--font);
+    font-weight: 600;
+    font-size: 12.5px;
+    color: var(--muted);
+    cursor: pointer;
+    user-select: none;
+    transition: all .15s ease;
+    letter-spacing: 1.5px;
+  }
+  .chip:hover { color: var(--text); background: rgba(185, 108, 255, 0.08); }
+  .chip.active {
+    color: white;
+    background: linear-gradient(135deg, rgba(185,108,255,0.35), rgba(255,108,240,0.25));
+    box-shadow: inset 0 0 0 1px rgba(185, 108, 255, 0.6), 0 0 24px rgba(185, 108, 255, 0.35);
+  }
+
+  /* ---------- rate control (top-right) ---------- */
+  .rate-ctl {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 10px 6px 12px;
+    background: rgba(20, 8, 42, 0.6);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    backdrop-filter: blur(14px);
+  }
+  .rate-ctl .lbl {
+    font-size: 11px; font-weight: 600; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .rate-ctl .pfx { color: var(--dim); font-weight: 500; font-size: 12px; margin-right: -3px; }
+  .rate-ctl input {
+    width: 60px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text);
+    font: 600 13px var(--font);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    padding: 4px 6px;
+    border-radius: 8px;
+    outline: none;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .rate-ctl input:hover  { border-color: rgba(185,108,255,0.25); }
+  .rate-ctl input:focus  {
+    border-color: rgba(185,108,255,0.7);
+    background: rgba(185,108,255,0.08);
+    box-shadow: 0 0 0 3px rgba(185,108,255,0.18);
+  }
+  /* hide spinners */
+  .rate-ctl input::-webkit-outer-spin-button,
+  .rate-ctl input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .rate-ctl input[type=number] { -moz-appearance: textfield; }
+  .rate-ctl .sfx { color: var(--dim); font-size: 11px; letter-spacing: 0.5px; }
+
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 18px;
+  }
+  .tile {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    padding: 14px 18px;
+    backdrop-filter: blur(18px);
+    box-shadow: var(--glow-soft);
+    position: relative;
+    overflow: hidden;
+  }
+  .tile::after {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(180px 80px at top right, rgba(185,108,255,0.10), transparent 70%);
+    pointer-events: none;
+  }
+  .tile .lbl {
+    color: var(--info); font-family: var(--font);
+    font-size: 11px; font-weight: 600; letter-spacing: 2px;
+    text-transform: uppercase;
+    text-shadow: 0 0 10px var(--info-glow);
+  }
+  .tile .val {
+    font-family: var(--font); font-variant-numeric: tabular-nums;
+    font-size: 28px; font-weight: 700; margin-top: 4px;
+    color: white;
+    text-shadow: 0 0 14px rgba(185, 108, 255, 0.45);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.5px;
+    line-height: 1.1;
+  }
+  .tile .val .u {
+    font-family: var(--font);
+    font-size: 12px; color: var(--muted);
+    margin-left: 4px; font-weight: 600;
+    letter-spacing: 0.5px; text-transform: lowercase;
+    text-shadow: none;
+  }
+  .tile .sub {
+    color: var(--info-soft); font-size: 11.5px; margin-top: 4px;
+    font-family: var(--font); font-variant-numeric: tabular-nums; letter-spacing: -0.2px;
+    opacity: 0.85;
+  }
+  .tile.live .val { color: #d6fff0; text-shadow: 0 0 16px rgba(108, 255, 174, 0.55); }
+  .tile.peak .val { color: #ffd2dd; text-shadow: 0 0 16px rgba(255, 108, 141, 0.55); }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 18px;
+    padding: 16px 18px 6px;
+    backdrop-filter: blur(18px);
+    box-shadow: var(--glow-soft);
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: "";
+    position: absolute; inset: -1px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, rgba(185,108,255,0.0), rgba(185,108,255,0.18) 50%, rgba(108,220,255,0.0) 100%);
+    -webkit-mask: linear-gradient(black, black) content-box, linear-gradient(black, black);
+    -webkit-mask-composite: xor;
+            mask-composite: exclude;
+    pointer-events: none;
+    padding: 1px;
+  }
+  .card h2 {
+    margin: 0 0 4px;
+    font-family: var(--font);
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 2.2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .card h2 .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent-1);
+    box-shadow: 0 0 12px var(--accent-1);
+  }
+  .card .legend {
+    margin-left: auto;
+    font-family: var(--font);
+    font-size: 11.5px; color: var(--info); font-weight: 500;
+    text-transform: none; letter-spacing: 0.3px;
+    text-shadow: 0 0 10px var(--info-glow);
+  }
+
+  .chart { width: 100%; height: 360px; }
+  .chart.tall { height: 420px; }
+  .chart.short { height: 220px; }
+
+  /* ---------- sparklines under each tile ---------- */
+  .tile { position: relative; }
+  .tile .spark {
+    display: block; width: 100%; height: 38px; margin-top: 6px;
+    /* fades right edge a bit so the sparkline reads as a tail not a hard cut */
+    mask-image: linear-gradient(90deg, transparent 0, black 12%, black 100%);
+  }
+
+  /* ---------- per-AIP strip ----------
+     Each model becomes a single .aip-group spanning N grid columns where N =
+     the AIP count for that model. Single-AIP / idle cards span 1 column.
+     Inside a group the per-AIP "mini" cells share a single ASCII header line
+     and a single colored strip — the line visually connects all the AIPs the
+     model is hosted on. */
+  .aip-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+    gap: 12px;
+    padding: 6px 0 16px;
+  }
+  .aip-group {
+    grid-column: span var(--span, 1);
+    position: relative;
+    border-radius: 12px;
+    border: 1px solid rgba(185, 108, 255, 0.22);
+    background: rgba(20, 8, 42, 0.45);
+    backdrop-filter: blur(10px);
+    box-shadow: inset 0 0 0 1px rgba(185, 108, 255, 0.06);
+    overflow: hidden;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  .aip-group:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0 28px rgba(185, 108, 255, 0.18),
+                inset 0 0 0 1px rgba(185, 108, 255, 0.35);
+  }
+  .aip-group .model-strip {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 3px;
+    transition: background .3s ease, box-shadow .3s ease;
+  }
+  /* ASCII-style header line: `------- gemma4-31b-c -------` spanning the
+     group width. Dashes are rendered via ::before/::after so they fill
+     flexibly; colour inherits from the model palette via the inline style
+     on .aip-group. */
+  .aip-group .model-line {
+    display: flex; align-items: center;
+    padding: 12px 14px 0;
+    font-size: 10px; font-weight: 700;
+    letter-spacing: 1.6px; text-transform: uppercase;
+    line-height: 1;
+  }
+  .aip-group .model-line::before,
+  .aip-group .model-line::after {
+    content: "";
+    flex: 1;
+    border-top: 1.4px dashed currentColor;
+    opacity: 0.7;
+  }
+  .aip-group .model-line .model-name {
+    padding: 0 10px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 70%;
+    text-shadow: 0 0 8px currentColor;
+  }
+  .aip-group.idle .model-line { color: var(--dim); opacity: 0.55; }
+  .aip-group.idle .model-line::before,
+  .aip-group.idle .model-line::after { border-top-style: dotted; }
+
+  .aip-group .group-inner {
+    display: grid;
+    grid-template-columns: repeat(var(--n, 1), 1fr);
+  }
+  .aip-mini {
+    position: relative;
+    padding: 8px 14px 12px;
+  }
+  .aip-mini + .aip-mini::before {
+    content: "";
+    position: absolute; left: 0; top: 6px; bottom: 6px;
+    border-left: 1px dashed rgba(185, 108, 255, 0.18);
+  }
+  .aip-mini .idx {
+    display: flex; justify-content: space-between; align-items: baseline;
+    color: var(--info); font-size: 11px; font-weight: 600;
+    letter-spacing: 1.6px; text-transform: uppercase;
+    text-shadow: 0 0 10px var(--info-glow);
+  }
+  .aip-mini .idx .temp {
+    font-weight: 700; letter-spacing: 0; font-variant-numeric: tabular-nums;
+    color: var(--good); text-transform: none;
+  }
+  .aip-mini .idx .temp.warn { color: var(--warn); }
+  .aip-mini .idx .temp.hot  { color: var(--hot); }
+  .aip-mini .row {
+    display: flex; align-items: center; gap: 10px; margin-top: 8px;
+    font-size: 12px; color: var(--muted);
+  }
+  .aip-mini .row .k {
+    width: 22px; font-weight: 600; letter-spacing: 0.5px;
+    color: var(--dim);
+  }
+  .aip-mini .row .bar {
+    flex: 1; height: 6px; border-radius: 999px;
+    background: rgba(185, 108, 255, 0.08);
+    overflow: hidden; position: relative;
+  }
+  .aip-mini .row .bar > i {
+    display: block; height: 100%; border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent-1), var(--accent-2));
+    box-shadow: 0 0 10px var(--accent-1);
+    transition: width .4s ease;
+  }
+  .aip-mini .row .bar.util > i { background: linear-gradient(90deg, var(--accent-3), #6cffd1); box-shadow: 0 0 10px var(--accent-3); }
+  .aip-mini .row .bar.mem  > i { background: linear-gradient(90deg, var(--accent-1), #6cdcff); box-shadow: 0 0 10px var(--accent-1); }
+  .aip-mini .row .v {
+    min-width: 60px; text-align: right;
+    color: var(--text); font-weight: 600; font-size: 12px;
+    font-variant-numeric: tabular-nums; letter-spacing: -0.2px;
+  }
+
+  .grid-2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; }
+  @media (max-width: 1100px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  footer {
+    margin-top: 24px;
+    text-align: center;
+    color: var(--dim);
+    font-size: 12px;
+    font-family: var(--font);
+    letter-spacing: 0.3px;
+  }
+  footer .credit {
+    color: var(--hot); font-weight: 700;
+    font-family: var(--font);
+    letter-spacing: 0.5px;
+    text-shadow: 0 0 14px rgba(255, 108, 141, 0.55);
+  }
+  .pulse {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--good);
+    box-shadow: 0 0 10px var(--good);
+    animation: pulse 2s ease-in-out infinite;
+    vertical-align: middle; margin-right: 6px;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--good); }
+    50%      { opacity: 0.4; box-shadow: 0 0 16px var(--good); }
+  }
+
+  /* ---------- splash screen (first ~3s) ---------- */
+  #splash {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 22px;
+    background: transparent;            /* lets the photo backdrop shine through */
+    transition: opacity .6s ease, visibility .6s ease;
+  }
+  #splash.hide { opacity: 0; visibility: hidden; }
+
+  .splash-mark {
+    position: relative; width: 110px; height: 110px;
+    display: grid; place-items: center;
+  }
+  .splash-mark .hex {
+    position: absolute; inset: 0;
+    border: 2px solid rgba(185,108,255,0.5);
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+    animation: hex-spin 4s linear infinite;
+    box-shadow: 0 0 30px rgba(185,108,255,0.35) inset, 0 0 28px rgba(185,108,255,0.35);
+  }
+  .splash-mark .hex.outer {
+    inset: -16px;
+    border-color: rgba(255,108,240,0.35);
+    animation-duration: 6s;
+    animation-direction: reverse;
+    box-shadow: 0 0 22px rgba(255,108,240,0.25);
+  }
+  .splash-mark .core {
+    width: 64px; height: 64px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, #b96cff, #ff6cf0);
+    display: grid; place-items: center;
+    color: #2a0658; font-weight: 800; font-size: 30px;
+    box-shadow: 0 0 60px rgba(185,108,255,0.65),
+                0 0 120px rgba(255,108,240,0.35);
+    animation: float 3s ease-in-out infinite, core-glow 2.4s ease-in-out infinite;
+  }
+  @keyframes hex-spin { to { transform: rotate(360deg); } }
+  @keyframes float    { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+  @keyframes core-glow {
+    0%,100% { box-shadow: 0 0 60px rgba(185,108,255,0.65), 0 0 120px rgba(255,108,240,0.35); }
+    50%     { box-shadow: 0 0 90px rgba(185,108,255,0.9),  0 0 180px rgba(255,108,240,0.55); }
+  }
+
+  .splash-title {
+    font-size: 30px; font-weight: 700; letter-spacing: 4px;
+    background: linear-gradient(90deg, #ffffff, var(--accent-1), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 0 40px rgba(185,108,255,0.45);
+  }
+  .splash-sub {
+    font-size: 11px; font-weight: 600; letter-spacing: 4px;
+    color: var(--muted); text-transform: uppercase;
+    display: inline-flex; gap: 2px; align-items: baseline;
+  }
+  .splash-sub .dots::after {
+    content: '';
+    display: inline-block; width: 1.5em; text-align: left;
+    animation: dots 1.4s steps(4, end) infinite;
+  }
+  @keyframes dots {
+    0%   { content: ''; }
+    25%  { content: '.'; }
+    50%  { content: '..'; }
+    75%  { content: '...'; }
+    100% { content: ''; }
+  }
+  .splash-bar {
+    width: 260px; height: 3px;
+    background: rgba(185,108,255,0.15);
+    border-radius: 999px;
+    overflow: hidden;
+    box-shadow: inset 0 0 0 1px rgba(185,108,255,0.18);
+  }
+  .splash-bar > i {
+    display: block; height: 100%; width: 0;
+    background: linear-gradient(90deg, var(--accent-1), var(--accent-2), var(--accent-3));
+    box-shadow: 0 0 14px var(--accent-1);
+    animation: fill 2.7s cubic-bezier(.4,0,.2,1) forwards;
+  }
+  @keyframes fill { to { width: 100%; } }
+
+  /* ---------- staggered section reveal ----------
+     NOTE: we clear `transform` back to `none` (not translateY(0)) once the
+     animation finishes so the element is no longer promoted to its own GPU
+     compositing layer. Otherwise `backdrop-filter` on descendant tiles/cards
+     can't sample the blurred chip backdrop and the glassmorphism stops
+     working. `will-change` is omitted for the same reason. */
+  .reveal {
+    opacity: 0;
+    transform: translateY(22px);
+    transition: opacity .7s cubic-bezier(.16,.84,.32,1),
+                transform .7s cubic-bezier(.16,.84,.32,1);
+  }
+  .reveal.show {
+    opacity: 1;
+    transform: none;
+  }
+</style>
+</head>
+<body>
+<div class="bg-photo" aria-hidden="true"></div>
+<div class="bg-tint"  aria-hidden="true"></div>
+
+<div id="splash" aria-hidden="true">
+  <div class="splash-mark">
+    <div class="hex outer"></div>
+    <div class="hex"></div>
+    <div class="core">⬢</div>
+  </div>
+  <div class="splash-title">GAUDI3 · POWER GRID</div>
+  <div class="splash-sub">CALCULATING TELEMETRY<span class="dots"></span></div>
+  <div class="splash-bar"><i></i></div>
+</div>
+
+<div class="wrap">
+
+  <header class="reveal">
+    <div class="brand">
+      <div class="mark">⬢</div>
+      <div>
+        <div class="title">GAUDI3 · POWER GRID</div>
+        <div class="sub"><span class="pulse"></span>live · 8× HL-325</div>
+      </div>
+    </div>
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+      <div class="rate-ctl" title="electricity rate · saved locally, recomputes all $ tiles">
+        <span class="lbl">rate</span>
+        <span class="pfx">$</span>
+        <input id="rate-input" type="number" step="0.01" min="0" max="10" value="0.12" inputmode="decimal" />
+        <span class="sfx">/ kWh</span>
+      </div>
+      <div class="ranges" id="ranges">
+        <div class="chip" data-r="1h">1H</div>
+        <div class="chip active" data-r="8h">8H</div>
+        <div class="chip" data-r="1d">1D</div>
+        <div class="chip" data-r="7d">7D</div>
+        <div class="chip" data-r="30d">30D</div>
+        <div class="chip" data-r="1y">1Y</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="stats-row reveal" id="stats">
+    <div class="tile live">
+      <div class="lbl">live · total</div>
+      <div class="val" id="t-now">— <span class="u">W</span></div>
+      <div class="sub" id="t-now-sub">awaiting samples</div>
+      <canvas class="spark" data-spark="live-w" data-color="#6cffae"></canvas>
+    </div>
+    <div class="tile">
+      <div class="lbl">today</div>
+      <div class="val" id="t-today">— <span class="u">kWh</span></div>
+      <div class="sub" id="t-today-sub"></div>
+      <canvas class="spark" data-spark="today-kwh" data-color="#b96cff"></canvas>
+    </div>
+    <div class="tile">
+      <div class="lbl">yesterday</div>
+      <div class="val" id="t-yest">— <span class="u">kWh</span></div>
+      <div class="sub">&nbsp;</div>
+      <canvas class="spark" data-spark="yest-kwh" data-color="#ffd06c"></canvas>
+    </div>
+    <div class="tile">
+      <div class="lbl">last 7 days</div>
+      <div class="val" id="t-7d">— <span class="u">kWh</span></div>
+      <div class="sub">&nbsp;</div>
+      <canvas class="spark" data-spark="kwh-7d" data-color="#6cdcff"></canvas>
+    </div>
+    <div class="tile">
+      <div class="lbl">last 30 days</div>
+      <div class="val" id="t-30d">— <span class="u">kWh</span></div>
+      <div class="sub">&nbsp;</div>
+      <canvas class="spark" data-spark="kwh-30d" data-color="#ff6cf0"></canvas>
+    </div>
+    <div class="tile peak">
+      <div class="lbl">peak · 30d</div>
+      <div class="val" id="t-peak">— <span class="u">W</span></div>
+      <div class="sub" id="t-peak-sub"></div>
+      <canvas class="spark" data-spark="peak-30d" data-color="#ff6c8d"></canvas>
+    </div>
+  </div>
+
+  <!-- Second row: efficiency + cost KPIs -->
+  <div class="stats-row reveal" id="stats-kpi">
+    <div class="tile">
+      <div class="lbl">J / token</div>
+      <div class="val" id="t-jpt">—</div>
+      <div class="sub" id="t-jpt-sub"></div>
+    </div>
+    <div class="tile">
+      <div class="lbl">tokens · window</div>
+      <div class="val" id="t-tok">—</div>
+      <div class="sub" id="t-tok-sub"></div>
+    </div>
+    <div class="tile">
+      <div class="lbl">$ · today</div>
+      <div class="val" id="t-cost-today">—</div>
+      <div class="sub" id="t-cost-rate"></div>
+    </div>
+    <div class="tile">
+      <div class="lbl">$ · yesterday</div>
+      <div class="val" id="t-cost-yest">—</div>
+      <div class="sub">&nbsp;</div>
+    </div>
+    <div class="tile">
+      <div class="lbl">$ · 30d</div>
+      <div class="val" id="t-cost-30d">—</div>
+      <div class="sub">&nbsp;</div>
+    </div>
+    <div class="tile">
+      <div class="lbl">$ · 1y</div>
+      <div class="val" id="t-cost-1y">—</div>
+      <div class="sub">&nbsp;</div>
+    </div>
+  </div>
+
+  <!-- Per-AIP live strip: 8 mini cards -->
+  <div class="card reveal">
+    <h2><span class="dot"></span>Per-AIP · live
+      <span class="legend">power · util · temp · HBM used (most recent 1s sample)</span>
+    </h2>
+    <div class="aip-strip" id="aip-strip"></div>
+  </div>
+
+  <div class="card reveal">
+    <h2><span class="dot"></span>Aggregate Power
+      <span class="legend">raw range · EWMA · spikes · model-active bands</span>
+    </h2>
+    <div class="chart tall" id="chart-power"></div>
+  </div>
+
+  <div class="grid-2 reveal">
+    <div class="card">
+      <h2><span class="dot"></span>Per-Model Request Rate
+        <span class="legend">requests/bucket · derived from vLLM /metrics</span>
+      </h2>
+      <div class="chart" id="chart-models"></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>Σ Utilisation & Hot AIP
+        <span class="legend">avg AIP util % · max temp °C</span>
+      </h2>
+      <div class="chart" id="chart-util"></div>
+    </div>
+  </div>
+
+  <div class="grid-2 reveal">
+    <div class="card">
+      <h2><span class="dot"></span>kWh · last 30 days
+        <span class="legend">daily totals · integrated from raw samples</span>
+      </h2>
+      <div class="chart" id="chart-daily"></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span>Activity heatmap
+        <span class="legend">avg W · day-of-week × hour-of-day · current window</span>
+      </h2>
+      <div class="chart" id="chart-heatmap"></div>
+    </div>
+  </div>
+
+  <footer class="reveal">
+    <div>hl-power · always-on logger · <span class="credit">made by Satyajit Bhuyan ⟨satyajit.bhuyan@intel.com⟩</span></div>
+  </footer>
+
+</div>
+
+<script src="/static/echarts.min.js"></script>
+<script>
+(function() {
+  // -------- palette --------
+  const PURPLE = '#b96cff';
+  const PINK   = '#ff6cf0';
+  const CYAN   = '#6cdcff';
+  const GREEN  = '#6cffae';
+  const RED    = '#ff6c8d';
+  const AMBER  = '#ffd06c';
+  const MUTED  = '#a892d0';
+  const DIM    = '#7f6caa';
+  const TEXT   = '#efe2ff';
+
+  // Distinct vivid hues for per-model lines (cycle).
+  const MODEL_PALETTE = ['#b96cff', '#ff6cf0', '#6cdcff', '#6cffae', '#ffd06c', '#ff8c6c', '#a672ff', '#6cffd1'];
+
+  const chartPower  = echarts.init(document.getElementById('chart-power'),  null, { renderer: 'canvas' });
+  const chartModels = echarts.init(document.getElementById('chart-models'), null, { renderer: 'canvas' });
+  const chartUtil   = echarts.init(document.getElementById('chart-util'),   null, { renderer: 'canvas' });
+  window.addEventListener('resize', () => {
+    chartPower.resize(); chartModels.resize(); chartUtil.resize();
+  });
+
+  const FONT      = "'Space Grotesk', -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif";
+  const FONT_BODY = FONT;
+  const FONT_MONO = FONT; /* same family — tabular-nums applied via CSS */
+
+  function baseTooltip() {
+    return {
+      trigger: 'axis',
+      backgroundColor: 'rgba(20, 8, 42, 0.92)',
+      borderColor: 'rgba(185, 108, 255, 0.55)',
+      borderWidth: 1,
+      textStyle: { color: TEXT, fontFamily: FONT_BODY, fontSize: 12 },
+      extraCssText: 'backdrop-filter: blur(14px); box-shadow: 0 8px 32px rgba(185,108,255,0.25); border-radius: 10px;',
+    };
+  }
+
+  function fmtKWh(v) { return v >= 100 ? v.toFixed(0) : v.toFixed(1); }
+  function fmtTs(ms) {
+    const d = new Date(ms);
+    return d.toLocaleString();
+  }
+
+  function renderPower(d) {
+    // EWMA → bold neon line w/ heavy glow
+    // raw range → translucent band between min and max
+    // peaks → scatter points
+    // model spans → marked horizontal bars at bottom
+
+    const series = [];
+
+    // Translucent band: min..max raw — use stacked area trick (min as transparent baseline, max-min as semi-fill).
+    const bandLower = d.power_min.map(p => p);
+    const bandUpperDelta = d.power_max.map((p, i) => [p[0], Math.max(0, p[1] - d.power_min[i][1])]);
+
+    series.push({
+      name: 'min',
+      type: 'line', stack: 'band',
+      data: bandLower,
+      lineStyle: { opacity: 0 },
+      symbol: 'none',
+      itemStyle: { color: 'transparent' },
+      areaStyle: { color: 'transparent' },
+      tooltip: { show: false },
+      z: 1,
+    });
+    series.push({
+      name: 'raw range (min..max)',
+      type: 'line', stack: 'band',
+      data: bandUpperDelta,
+      lineStyle: { opacity: 0 },
+      symbol: 'none',
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(185, 108, 255, 0.30)' },
+          { offset: 1, color: 'rgba(108, 220, 255, 0.06)' },
+        ]),
+      },
+      z: 1,
+    });
+
+    // EWMA — main signal line
+    series.push({
+      name: 'EWMA',
+      type: 'line',
+      data: d.ewma,
+      smooth: 0.25,
+      showSymbol: false,
+      lineStyle: {
+        width: 3,
+        color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [
+          { offset: 0, color: PURPLE },
+          { offset: 1, color: PINK },
+        ]),
+        shadowColor: 'rgba(185, 108, 255, 0.85)',
+        shadowBlur: 22,
+      },
+      emphasis: { lineStyle: { width: 4, shadowBlur: 32 } },
+      z: 4,
+    });
+
+    // Peak markers
+    series.push({
+      name: 'spikes',
+      type: 'scatter',
+      data: d.peaks,
+      symbol: 'circle',
+      symbolSize: 9,
+      itemStyle: {
+        color: RED,
+        borderColor: 'rgba(255, 108, 141, 0.4)',
+        borderWidth: 4,
+        shadowColor: RED,
+        shadowBlur: 18,
+      },
+      z: 5,
+    });
+
+    // Model active spans: render at bottom of plot as wide horizontal bands.
+    // We use markArea on a dummy invisible series so spans stick to bottom axis.
+    const colorMap = {};
+    d.models.forEach((m, i) => { colorMap[m.id] = MODEL_PALETTE[i % MODEL_PALETTE.length]; });
+    const markAreas = [];
+    d.models.forEach((m) => {
+      m.spans.forEach(([s, e]) => {
+        markAreas.push([
+          { xAxis: s, itemStyle: {
+              color: colorMap[m.id] + '22',
+              borderColor: colorMap[m.id] + 'aa',
+              borderWidth: 1,
+              shadowColor: colorMap[m.id], shadowBlur: 14 },
+            name: m.id,
+            label: { show: false } },
+          { xAxis: e },
+        ]);
+      });
+    });
+    series.push({
+      name: 'models',
+      type: 'line',
+      data: [],
+      markArea: {
+        silent: false,
+        label: {
+          show: true, position: 'insideTop',
+          color: TEXT, fontSize: 10, fontWeight: 600,
+          textShadowColor: 'rgba(0,0,0,0.8)', textShadowBlur: 4,
+        },
+        data: markAreas,
+      },
+      z: 2,
+    });
+
+    chartPower.setOption({
+      animationDuration: 1500,
+      animationDurationUpdate: 1500,
+      animationEasing: 'cubicOut',
+      animationEasingUpdate: 'cubicOut',
+      grid: { left: 64, right: 28, top: 16, bottom: 36 },
+      tooltip: {
+        ...baseTooltip(),
+        formatter: (params) => {
+          const ts = params[0]?.value?.[0];
+          if (!ts) return '';
+          let out = `<div style="font-family:${FONT_MONO};font-size:11px;color:${DIM};margin-bottom:6px;letter-spacing:-0.2px">${fmtTs(ts)}</div>`;
+          for (const p of params) {
+            if (p.seriesName === 'min' || p.seriesName === 'models') continue;
+            const v = Array.isArray(p.value) ? p.value[1] : p.value;
+            if (v == null) continue;
+            const color = p.color?.colorStops?.[0]?.color || p.color || '#fff';
+            out += `<div style="display:flex;justify-content:space-between;gap:18px;font-size:12px;line-height:1.6">
+              <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};box-shadow:0 0 8px ${color};margin-right:8px;vertical-align:middle"></span>${p.seriesName}</span>
+              <strong style="color:${TEXT};font-family:${FONT_MONO};font-variant-numeric:tabular-nums">${Number(v).toLocaleString()} W</strong>
+            </div>`;
+          }
+          return out;
+        },
+      },
+      legend: { show: false },
+      xAxis: {
+        type: 'time',
+        axisLine:  { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT_MONO },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'Watts',
+        nameTextStyle: { color: DIM, fontSize: 11, fontFamily: FONT_BODY, fontWeight: 600, padding: [0, 0, 0, 40] },
+        axisLine:  { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT_MONO, formatter: (v) => v.toFixed(0) },
+        splitLine: { lineStyle: { color: 'rgba(185,108,255,0.07)', type: 'dashed' } },
+      },
+      series,
+    }, true);
+  }
+
+  function renderModels(d) {
+    const series = [];
+    Object.entries(d.per_model_metrics).forEach(([mid, points], i) => {
+      const c = MODEL_PALETTE[i % MODEL_PALETTE.length];
+      series.push({
+        name: mid,
+        type: 'line',
+        data: points.map(p => [p.ts, p.reqs]),
+        smooth: 0.3,
+        showSymbol: false,
+        lineStyle: { width: 2.2, color: c, shadowColor: c, shadowBlur: 16 },
+        areaStyle: { color: c + '22' },
+        emphasis: { lineStyle: { width: 3 } },
+      });
+    });
+    if (series.length === 0) {
+      series.push({
+        name: 'idle',
+        type: 'line',
+        data: [],
+      });
+    }
+    chartModels.setOption({
+      animationDuration: 1500,
+      animationDurationUpdate: 1500,
+      animationEasing: 'cubicOut',
+      animationEasingUpdate: 'cubicOut',
+      grid: { left: 56, right: 20, top: 60, bottom: 36 },
+      tooltip: baseTooltip(),
+      legend: {
+        top: 6, left: 0,
+        textStyle: { color: MUTED, fontSize: 11.5, fontFamily: FONT_BODY, fontWeight: 500 },
+        itemWidth: 14, itemHeight: 8, itemGap: 14,
+        icon: 'roundRect',
+      },
+      xAxis: {
+        type: 'time',
+        axisLine:  { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT_MONO },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'reqs',
+        nameGap: 18,
+        nameTextStyle: { color: DIM, fontSize: 11, fontFamily: FONT_BODY, fontWeight: 600 },
+        axisLine:  { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT_MONO },
+        splitLine: { lineStyle: { color: 'rgba(185,108,255,0.07)', type: 'dashed' } },
+      },
+      series,
+    }, true);
+  }
+
+  function renderUtil(d) {
+    const utilSeries = {
+      name: 'AIP util %',
+      type: 'line',
+      data: d.util,
+      smooth: 0.25,
+      showSymbol: false,
+      lineStyle: { width: 2.5, color: CYAN, shadowColor: CYAN, shadowBlur: 14 },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(108, 220, 255, 0.32)' },
+          { offset: 1, color: 'rgba(108, 220, 255, 0.02)' },
+        ]),
+      },
+      yAxisIndex: 0,
+    };
+    const tempSeries = {
+      name: 'hot AIP °C',
+      type: 'line',
+      data: d.temp,
+      smooth: 0.25,
+      showSymbol: false,
+      lineStyle: { width: 2, color: AMBER, shadowColor: AMBER, shadowBlur: 12 },
+      yAxisIndex: 1,
+    };
+    chartUtil.setOption({
+      animationDuration: 1500,
+      animationDurationUpdate: 1500,
+      animationEasing: 'cubicOut',
+      animationEasingUpdate: 'cubicOut',
+      grid: { left: 56, right: 56, top: 60, bottom: 36 },
+      tooltip: baseTooltip(),
+      legend: {
+        top: 6, left: 0,
+        textStyle: { color: MUTED, fontSize: 11 },
+        itemWidth: 14, itemHeight: 8, itemGap: 14, icon: 'roundRect',
+      },
+      xAxis: {
+        type: 'time',
+        axisLine:  { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT_MONO },
+        splitLine: { show: false },
+      },
+      yAxis: [
+        { type: 'value', name: '%', max: 100, min: 0, nameGap: 18,
+          nameTextStyle: { color: DIM, fontSize: 11, fontFamily: FONT_BODY, fontWeight: 600 },
+          axisLine: { lineStyle: { color: 'rgba(108,220,255,0.25)' } },
+          axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT_MONO },
+          splitLine: { lineStyle: { color: 'rgba(185,108,255,0.07)', type: 'dashed' } } },
+        { type: 'value', name: '°C', nameGap: 18,
+          nameTextStyle: { color: DIM, fontSize: 11, fontFamily: FONT_BODY, fontWeight: 600 },
+          axisLine: { lineStyle: { color: 'rgba(255,208,108,0.25)' } },
+          axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT_MONO },
+          splitLine: { show: false } },
+      ],
+      series: [utilSeries, tempSeries],
+    }, true);
+  }
+
+  function renderStats(d) {
+    const s = d.summary;
+    const live = d.live;
+    if (live) {
+      document.getElementById('t-now').innerHTML = `${Math.round(live.total_w).toLocaleString()} <span class="u">W</span>`;
+      document.getElementById('t-now-sub').textContent =
+        `util ${live.util_avg.toFixed(1)}% · hot ${live.temp_max.toFixed(0)}°C · ${new Date(live.ts).toLocaleTimeString()}`;
+    }
+    document.getElementById('t-today').innerHTML = `${fmtKWh(s.kwh_today)} <span class="u">kWh</span>`;
+    document.getElementById('t-today-sub').textContent =
+      s.kwh_today > 0 ? `≈ ${fmtUSD(s.kwh_today * (d.cost?.rate_per_kwh ?? 0.12))} @ $${(d.cost?.rate_per_kwh ?? 0.12).toFixed(2)}/kWh` : '';
+    document.getElementById('t-yest').innerHTML = `${fmtKWh(s.kwh_yest)} <span class="u">kWh</span>`;
+    document.getElementById('t-7d').innerHTML   = `${fmtKWh(s.kwh_7d)} <span class="u">kWh</span>`;
+    document.getElementById('t-30d').innerHTML  = `${fmtKWh(s.kwh_30d)} <span class="u">kWh</span>`;
+    document.getElementById('t-peak').innerHTML = `${Math.round(s.peak_w).toLocaleString()} <span class="u">W</span>`;
+    document.getElementById('t-peak-sub').textContent =
+      s.peak_w_at ? new Date(s.peak_w_at).toLocaleString() : '';
+
+    // KPI row
+    const jpt = d.joules_per_token || 0;
+    document.getElementById('t-jpt').innerHTML =
+      jpt > 0 ? `${jpt.toFixed(1)} <span class="u">J/tok</span>` : `— <span class="u">J/tok</span>`;
+    document.getElementById('t-jpt-sub').textContent =
+      jpt > 0 ? `${(jpt / 3.6).toFixed(2)} mWh/tok · window` : 'awaiting tokens';
+    const tw = d.tokens_window || 0;
+    document.getElementById('t-tok').innerHTML =
+      `${fmtCompact(tw)} <span class="u">tok</span>`;
+    document.getElementById('t-tok-sub').textContent =
+      tw > 0 ? `from ${(d.kwh_window || 0).toFixed(2)} kWh` : '';
+
+    const c = d.cost || {};
+    document.getElementById('t-cost-today').innerHTML = `${fmtUSD(c.today || 0)}`;
+    document.getElementById('t-cost-rate').textContent =
+      `@ $${(c.rate_per_kwh ?? 0.12).toFixed(2)}/kWh`;
+    document.getElementById('t-cost-yest').innerHTML = `${fmtUSD(c.yest || 0)}`;
+    document.getElementById('t-cost-30d').innerHTML  = `${fmtUSD(c.kwh_30d || 0)}`;
+    document.getElementById('t-cost-1y').innerHTML   = `${fmtUSD(c.kwh_1y || 0)}`;
+  }
+
+  function fmtUSD(v) {
+    if (v == null) return '$—';
+    if (v >= 1000) return `$${v.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+    if (v >= 10) return `$${v.toFixed(1)}`;
+    return `$${v.toFixed(2)}`;
+  }
+  function fmtCompact(n) {
+    if (!n) return '0';
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+    return n.toLocaleString();
+  }
+
+  // ---------- sparkline canvas drawer ----------
+  function drawSparkline(canvas, data, color) {
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(40, Math.floor(rect.width * dpr));
+    const h = Math.max(20, Math.floor(rect.height * dpr));
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    if (!data || data.length < 2) return;
+    const vals = data.map(p => p[1]);
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    const range = (hi - lo) || 1;
+    // soft fill under line
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    for (let i = 0; i < data.length; i++) {
+      const x = (i / (data.length - 1)) * w;
+      const y = h - ((data[i][1] - lo) / range) * (h * 0.85) - h * 0.08;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, color + '55');
+    grad.addColorStop(1, color + '00');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    // glowing line
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) {
+      const x = (i / (data.length - 1)) * w;
+      const y = h - ((data[i][1] - lo) / range) * (h * 0.85) - h * 0.08;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8 * dpr;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 8 * dpr;
+    ctx.stroke();
+    // endpoint dot
+    const lx = w;
+    const ly = h - ((vals[vals.length - 1] - lo) / range) * (h * 0.85) - h * 0.08;
+    ctx.beginPath();
+    ctx.arc(lx - 2 * dpr, ly, 2.6 * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.shadowBlur = 12 * dpr;
+    ctx.fill();
+  }
+
+  function sparkData(name, d) {
+    // Returns an array of [x, y] tuples. drawSparkline treats x positionally
+    // (uses index), so any 2-tuple format works — we just need the y value.
+    switch (name) {
+      case 'live-w':    return d.sparklines?.total_w || [];
+      case 'live-util': return d.sparklines?.util    || [];
+      case 'live-temp': return d.sparklines?.temp    || [];
+      case 'today-kwh': return (d.today_hourly_kwh || []).map((r, i) => [i, r.kwh]);
+      case 'yest-kwh':  return (d.yest_hourly_kwh  || []).map((r, i) => [i, r.kwh]);
+      case 'kwh-7d':    return (d.kwh_30d_daily || []).slice(-7).map((r, i) => [i, r.kwh]);
+      case 'kwh-30d':   return (d.kwh_30d_daily || []).map((r, i) => [i, r.kwh]);
+      case 'peak-30d':  return (d.peak_w_30d_daily || []).map((r, i) => [i, r.peak_w]);
+      default:          return [];
+    }
+  }
+
+  function renderSparklines(d) {
+    document.querySelectorAll('canvas.spark').forEach((c) => {
+      const key = c.dataset.spark;
+      const color = c.dataset.color || '#b96cff';
+      drawSparkline(c, sparkData(key, d), color);
+    });
+  }
+
+  // ---------- per-AIP live strip ----------
+  function aipTempClass(t) {
+    if (t >= 65) return 'hot';
+    if (t >= 45) return 'warn';
+    return '';
+  }
+  function renderAipStrip(d) {
+    const strip = document.getElementById('aip-strip');
+    const list = d.per_aip_live || [];
+    if (!list.length) { strip.innerHTML = '<div style="color:var(--dim);padding:8px">awaiting samples…</div>'; return; }
+    const PWR_MAX = 850;
+    const byIdx = {};
+    list.forEach(a => { byIdx[a.idx] = a; });
+
+    // Build groups: each docker-detected model → one group; remaining AIPs
+    // (no model assigned) → single-AIP idle groups.
+    const groups = [];
+    const claimed = new Set();
+    (d.models_on_aips || []).forEach((m, i) => {
+      const color = MODEL_PALETTE[i % MODEL_PALETTE.length];
+      const aips = (m.aips || [])
+        .filter(idx => idx in byIdx)
+        .map(idx => byIdx[idx])
+        .sort((a, b) => a.idx - b.idx);
+      if (!aips.length) return;
+      aips.forEach(a => claimed.add(a.idx));
+      groups.push({ model: m.id, color, aips });
+    });
+    list.forEach(a => {
+      if (!claimed.has(a.idx)) groups.push({ model: null, color: null, aips: [a] });
+    });
+    groups.sort((g1, g2) => g1.aips[0].idx - g2.aips[0].idx);
+
+    const miniHtml = (a) => {
+      const memPct = a.mem_total_mib > 0 ? (a.mem_used_mib / a.mem_total_mib * 100) : 0;
+      const memGB = a.mem_used_mib / 1024;
+      const memTotGB = a.mem_total_mib / 1024;
+      return `<div class="aip-mini">
+        <div class="idx">
+          <span>AIP <span style="color:var(--accent-1);font-weight:700">#${a.idx}</span></span>
+          <span class="temp ${aipTempClass(a.temp)}">${a.temp.toFixed(0)}°C</span>
+        </div>
+        <div class="row">
+          <span class="k">P</span>
+          <span class="bar"><i style="width:${Math.min(100, a.power/PWR_MAX*100).toFixed(1)}%"></i></span>
+          <span class="v">${a.power.toFixed(0)} W</span>
+        </div>
+        <div class="row">
+          <span class="k">U</span>
+          <span class="bar util"><i style="width:${Math.min(100, a.util).toFixed(1)}%"></i></span>
+          <span class="v">${a.util.toFixed(0)} %</span>
+        </div>
+        <div class="row">
+          <span class="k">M</span>
+          <span class="bar mem"><i style="width:${memPct.toFixed(1)}%"></i></span>
+          <span class="v">${memGB.toFixed(0)}/${memTotGB.toFixed(0)} G</span>
+        </div>
+      </div>`;
+    };
+
+    strip.innerHTML = groups.map(g => {
+      const n = g.aips.length;
+      const idle = !g.model;
+      const stripStyle = g.color
+        ? `background:${g.color};box-shadow:0 0 12px ${g.color}`
+        : 'background:rgba(185,108,255,0.10)';
+      const colorStyle = g.color ? `color:${g.color};` : '';
+      return `<div class="aip-group${idle ? ' idle' : ''}" style="--span:${n};--n:${n};${colorStyle}">
+        <div class="model-strip" style="${stripStyle}"></div>
+        <div class="model-line"><span class="model-name">${g.model || '—'}</span></div>
+        <div class="group-inner">${g.aips.map(miniHtml).join('')}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // ---------- 30-day kWh bars ----------
+  const chartDaily   = echarts.init(document.getElementById('chart-daily'),   null, { renderer: 'canvas' });
+  const chartHeatmap = echarts.init(document.getElementById('chart-heatmap'), null, { renderer: 'canvas' });
+  window.addEventListener('resize', () => { chartDaily.resize(); chartHeatmap.resize(); });
+
+  function renderDaily(d) {
+    const rows = d.kwh_30d_daily || [];
+    const dates = rows.map(r => r.date);
+    const vals = rows.map(r => r.kwh);
+    chartDaily.setOption({
+      animationDuration: 1500,
+      animationDurationUpdate: 1500,
+      animationEasing: 'cubicOut',
+      animationEasingUpdate: 'cubicOut',
+      grid: { left: 56, right: 20, top: 18, bottom: 50 },
+      tooltip: {
+        ...baseTooltip(),
+        formatter: (params) => {
+          const p = params[0];
+          return `<div style="font-size:11px;color:${DIM};margin-bottom:6px">${p.axisValue}</div>
+                  <strong style="font-size:14px;color:${TEXT};font-variant-numeric:tabular-nums">${Number(p.value).toFixed(2)} kWh</strong>`;
+        },
+      },
+      xAxis: {
+        type: 'category', data: dates,
+        axisLine:  { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 10, rotate: 45, fontFamily: FONT, formatter: (v) => v.slice(5) },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'kWh',
+        nameTextStyle: { color: DIM, fontSize: 11, fontFamily: FONT, fontWeight: 600 },
+        axisLine:  { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT },
+        splitLine: { lineStyle: { color: 'rgba(185,108,255,0.07)', type: 'dashed' } },
+      },
+      series: [{
+        type: 'bar',
+        data: vals,
+        barWidth: '70%',
+        itemStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: '#ff6cf0' },
+            { offset: 1, color: '#b96cff' },
+          ]),
+          borderRadius: [6, 6, 0, 0],
+          shadowColor: 'rgba(185, 108, 255, 0.45)',
+          shadowBlur: 16,
+        },
+        emphasis: {
+          itemStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: '#ff8cf6' },
+              { offset: 1, color: '#d18cff' },
+            ]),
+            shadowBlur: 28,
+          },
+        },
+      }],
+    }, true);
+  }
+
+  // ---------- hour × dow heatmap ----------
+  const DOW_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  function renderHeatmap(d) {
+    const m = d.heatmap || [];
+    const data = [];
+    let lo = Infinity, hi = -Infinity;
+    for (let dow = 0; dow < 7; dow++) {
+      for (let hr = 0; hr < 24; hr++) {
+        const v = (m[dow] && m[dow][hr] != null) ? m[dow][hr] : null;
+        data.push([hr, dow, v]);
+        if (v != null) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      }
+    }
+    if (!isFinite(lo)) { lo = 0; hi = 1; }
+    chartHeatmap.setOption({
+      animationDuration: 1500,
+      animationDurationUpdate: 1500,
+      animationEasing: 'cubicOut',
+      animationEasingUpdate: 'cubicOut',
+      grid: { left: 56, right: 26, top: 18, bottom: 70 },
+      tooltip: {
+        ...baseTooltip(),
+        formatter: (p) => {
+          const [hr, dow, v] = p.value;
+          if (v == null) return `${DOW_NAMES[dow]} ${String(hr).padStart(2,'0')}:00 · no data`;
+          return `<div style="font-size:11px;color:${DIM};margin-bottom:4px">${DOW_NAMES[dow]} ${String(hr).padStart(2,'0')}:00</div>
+                  <strong style="font-size:14px;color:${TEXT};font-variant-numeric:tabular-nums">${Number(v).toFixed(0)} W</strong>`;
+        },
+      },
+      xAxis: {
+        type: 'category',
+        data: Array.from({length: 24}, (_, i) => String(i).padStart(2, '0')),
+        axisLine: { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 10, fontFamily: FONT },
+        splitArea: { show: false },
+      },
+      yAxis: {
+        type: 'category',
+        data: DOW_NAMES,
+        axisLine: { lineStyle: { color: 'rgba(185,108,255,0.25)' } },
+        axisLabel: { color: MUTED, fontSize: 11, fontFamily: FONT, fontWeight: 600 },
+        splitArea: { show: false },
+      },
+      visualMap: {
+        min: lo, max: hi,
+        show: true,
+        orient: 'horizontal',
+        left: 'center', bottom: 6,
+        itemWidth: 14, itemHeight: 220,
+        precision: 0,
+        text: ['hi W', 'lo W'],     /* ECharts paints text[0] right side, text[1] left side */
+        textStyle: { color: MUTED, fontSize: 10, fontFamily: FONT, fontWeight: 600 },
+        textGap: 8,
+        inRange: {
+          color: ['#1a0a36', '#3a1773', '#7026cf', '#b96cff', '#ff6cf0'],
+        },
+      },
+      series: [{
+        type: 'heatmap',
+        data: data,
+        itemStyle: {
+          /* Strong, visible grid: a 2 px stroke in a near-card-bg dark colour
+             carves out gap-style lines between cells. progressive rendering
+             can suppress borders on initial paint at large sizes, so leave it
+             off. */
+          borderType: 'solid',
+          borderColor: 'rgba(7, 2, 26, 0.95)',
+          borderWidth: 2,
+          borderRadius: 2,
+        },
+        emphasis: {
+          itemStyle: {
+            borderColor: '#ffffff',
+            borderWidth: 2,
+            shadowBlur: 18,
+            shadowColor: 'rgba(185, 108, 255, 0.85)',
+          },
+        },
+      }],
+    }, true);
+  }
+
+  let currentRange = '8h';
+  // Persistent rate via localStorage; honour ?rate= override if present in URL.
+  const rateInput = document.getElementById('rate-input');
+  const urlRate = new URLSearchParams(location.search).get('rate');
+  let currentRate = parseFloat(urlRate) || parseFloat(localStorage.getItem('hl-power.rate')) || 0.12;
+  rateInput.value = currentRate.toFixed(2);
+  function commitRate() {
+    const v = parseFloat(rateInput.value);
+    if (!isFinite(v) || v < 0) { rateInput.value = currentRate.toFixed(2); return; }
+    currentRate = v;
+    localStorage.setItem('hl-power.rate', String(v));
+    refresh();
+  }
+  rateInput.addEventListener('change', commitRate);
+  rateInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { rateInput.blur(); } });
+
+  async function refresh() {
+    try {
+      const r = await fetch(`/api/series?range=${currentRange}&rate=${currentRate}`, { cache: 'no-store' });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      renderStats(d);
+      renderSparklines(d);
+      renderAipStrip(d);
+      renderPower(d);
+      renderModels(d);
+      renderUtil(d);
+      renderDaily(d);
+      renderHeatmap(d);
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  document.getElementById('ranges').addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    document.querySelectorAll('#ranges .chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    currentRange = chip.dataset.r;
+    refresh();
+  });
+
+  // ---------- splash → staggered reveal ----------
+  // Kick the first data fetch immediately so values are ready when sections
+  // glide in. Splash holds for 3 s regardless, then we fade it out and reveal
+  // each top-level section with a small stagger.
+  const SPLASH_MS = 3000;
+  const STAGGER_MS = 140;
+  const firstFetch = refresh();
+  setTimeout(async () => {
+    try { await firstFetch; } catch (_) { /* ignore */ }
+    document.getElementById('splash').classList.add('hide');
+    const sections = document.querySelectorAll('.reveal');
+    sections.forEach((el, i) => {
+      setTimeout(() => el.classList.add('show'), 80 + i * STAGGER_MS);
+    });
+    // Now that the layout is settling, force a chart resize so they fill the
+    // freshly-revealed cards correctly.
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 80 + sections.length * STAGGER_MS + 400);
+  }, SPLASH_MS);
+
+  setInterval(refresh, 5000);
+})();
+</script>
+</body>
+</html>

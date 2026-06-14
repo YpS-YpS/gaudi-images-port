@@ -1,0 +1,17 @@
+[Unit]
+Description=hl-power dashboard server (read-only) on 0.0.0.0:9090
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HL_POWER_HOST=0.0.0.0
+Environment=HL_POWER_PORT=9090
+ExecStart=/usr/bin/python3 %h/gaudi-setup/hl-power/server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

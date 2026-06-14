@@ -1,0 +1,16 @@
+[Unit]
+Description=hl-power logger — Gaudi power + model usage to SQLite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/gaudi-setup/hl-power/logger.py
+Restart=on-failure
+RestartSec=5
+# Keep stdout small but visible in journalctl --user
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

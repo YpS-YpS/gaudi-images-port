@@ -1,0 +1,1080 @@
+#!/usr/bin/env python3
+"""hl-top-mini — compact btop-style live monitor for Habana Gaudi AIPs.
+
+One dense colorful line per AIP inside a single rounded box.
+Designed to fit all 8 Gaudis in ~12 vertical lines while still showing
+every field hl-smi exposes (temp, util, mem, power, clocks, PCIe, serial,
+module id, bus id, driver). Sister to `hl-top`; this version optimizes
+for vertical screen real-estate.
+"""
+from __future__ import annotations
+
+import colorsys
+import json
+import math
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+
+REFRESH_SEC = 1.0
+HISTORY = 60
+
+# Aggregate-power graph state
+POWER_HISTORY = 600        # raw samples kept (≈10 min @ 1s)
+POWER_EWMA_ALPHA = 0.12    # EWMA smoothing factor (lower = smoother)
+POWER_GRAPH_ROWS = 5       # vertical cells in the power graph
+POWER_PEAK_MARGIN = 1.003  # raw must exceed EWMA by this factor to count as a "peak"
+
+# Long-horizon EWMAs (persisted across runs). Each entry: (label, tau_seconds).
+# alpha per sample at dt = 1 - exp(-dt/tau).
+LONG_HORIZONS = [
+    ("1h",  3600),
+    ("2h",  7200),
+    ("8h",  28800),
+    ("24h", 86400),
+    ("7d",  604800),
+]
+STATE_DIR = Path(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+) / "hl-top-mini"
+STATE_FILE = STATE_DIR / "power_ewma.json"
+DAILY_FILE = STATE_DIR / "power_daily.json"
+LONG_SAVE_INTERVAL_SEC = 60.0
+# Cap dt per tick so a long pause (process stopped) doesn't bleed a single
+# spike across the full window — we resume from the saved EWMA value instead.
+LONG_DT_CAP_SEC = 5.0
+# Same cap protects the daily-energy integrator (so a long process pause does
+# not retroactively assign last-known-power across hours of wall clock).
+DAILY_DT_CAP_SEC = 5.0
+# Keep N days of history; older entries get pruned.
+DAILY_KEEP_DAYS = 30
+
+# Model-server scan settings. We probe common vLLM / OpenAI-compatible ports
+# for /v1/models. Detection runs in a background thread so the dashboard never
+# blocks on a slow probe.
+MODEL_SCAN_INTERVAL_SEC = 15.0
+MODEL_SCAN_PORTS = (
+    list(range(8000, 8021)) + list(range(30000, 30011)) + [11434, 9000, 9001]
+)
+MODEL_PROBE_TIMEOUT = 0.5
+
+QUERY_FIELDS = [
+    "index", "module_id", "name", "bus_id", "serial",
+    "temperature.aip",
+    "utilization.aip", "utilization.memory",
+    "memory.used", "memory.free", "memory.total",
+    "power.draw", "power.max",
+    "clocks.current.soc", "clocks.max.soc",
+    "pcie.link.gen.current", "pcie.link.gen.max",
+    "pcie.link.width.current", "pcie.link.width.max",
+    "driver_version",
+    # Health: ECC counts (raw integers) + violation times (nanoseconds cumulative)
+    "ecc.errors.uncorrected.aggregate.total",
+    "ecc.errors.corrected.aggregate.total",
+    "ecc.errors.dram.aggregate.total",
+    "stats.violation.power",
+    "stats.violation.thermal",
+]
+
+SPARK_CHARS = "▁▂▃▄▅▆▇█"
+BAR_FULL = "█"
+BAR_EMPTY = "·"
+
+# ANSI helpers
+ESC = "\x1b"
+CSI = ESC + "["
+ALT_ON = CSI + "?1049h"
+ALT_OFF = CSI + "?1049l"
+CURSOR_HIDE = CSI + "?25l"
+CURSOR_SHOW = CSI + "?25h"
+CLEAR = CSI + "2J"
+HOME = CSI + "H"
+RESET = CSI + "0m"
+BOLD = CSI + "1m"
+DIM = CSI + "2m"
+ERASE_DOWN = CSI + "J"          # clear from cursor to end of screen
+SYNC_BEGIN = CSI + "?2026h"     # synchronized-output mode (xterm extension)
+SYNC_END = CSI + "?2026l"       # terminals that don't support it ignore it
+
+
+def fg(r: int, g: int, b: int) -> str:
+    return f"{CSI}38;2;{r};{g};{b}m"
+
+
+# Palette — btop-ish, slightly punchier than hl-top
+C_FRAME = fg(70, 80, 105)
+C_TITLE = BOLD + fg(190, 210, 250)
+C_LABEL = fg(135, 145, 170)
+C_VALUE = fg(225, 225, 235)
+C_DIM = fg(95, 100, 120)
+C_SEP = fg(60, 70, 90)
+C_ACCENT = fg(120, 200, 255)
+C_OK = fg(120, 220, 130)
+C_WARN = fg(240, 200, 100)
+C_HOT = fg(240, 110, 110)
+C_IDX = BOLD + fg(255, 180, 90)
+C_MOD = fg(180, 140, 255)
+C_BUS = fg(120, 180, 220)
+C_SN = fg(140, 200, 160)
+
+
+def gradient(pct: float) -> str:
+    """Green → yellow → red across 0..100."""
+    pct = max(0.0, min(100.0, pct))
+    if pct < 50:
+        t = pct / 50.0
+        r = int(80 + (240 - 80) * t)
+        g = int(220 - (220 - 200) * t)
+        b = int(130 - (130 - 80) * t)
+    else:
+        t = (pct - 50) / 50.0
+        r = 240
+        g = int(200 - (200 - 80) * t)
+        b = 80
+    return fg(r, g, b)
+
+
+def rainbow(text: str, phase: float = 0.0, sat: float = 0.85, val: float = 1.0) -> str:
+    """Color each printable char with an HSV hue swept across the string, offset
+    by `phase` (0..1) so successive frames produce a subtle shimmer."""
+    visible_count = sum(1 for c in text if not c.isspace())
+    if visible_count == 0:
+        return text
+    out = []
+    i = 0
+    for c in text:
+        if c.isspace():
+            out.append(c)
+            continue
+        h = (i / max(1, visible_count - 1) * 0.85 + phase) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(h, sat, val)
+        out.append(fg(int(r * 255), int(g * 255), int(b * 255)) + c)
+        i += 1
+    out.append(RESET)
+    return "".join(out)
+
+
+def temp_color(c: float) -> str:
+    if c < 45:
+        return C_OK
+    if c < 65:
+        return C_WARN
+    return C_HOT
+
+
+def bar(pct: float, width: int) -> str:
+    pct = max(0.0, min(100.0, pct))
+    if width <= 0:
+        return ""
+    filled = int(round((pct / 100.0) * width))
+    empty = width - filled
+    return gradient(pct) + BAR_FULL * filled + C_DIM + BAR_EMPTY * empty + RESET
+
+
+def sparkline(values: deque, width: int) -> str:
+    if not values or width <= 0:
+        return " " * max(0, width)
+    data = list(values)[-width:]
+    hi = max(max(data), 1.0)
+    out = []
+    for v in data:
+        idx = int((v / hi) * (len(SPARK_CHARS) - 1))
+        idx = max(0, min(len(SPARK_CHARS) - 1, idx))
+        out.append(SPARK_CHARS[idx])
+    s = "".join(out).rjust(width)
+    return gradient(values[-1]) + s + RESET
+
+
+@dataclass
+class AIP:
+    index: int
+    module_id: int
+    name: str
+    bus_id: str
+    serial: str
+    temp: float
+    util: float
+    mem_util: float
+    mem_used: float
+    mem_free: float
+    mem_total: float
+    power: float
+    power_max: float
+    clock: float
+    clock_max: float
+    pcie_gen_cur: str
+    pcie_gen_max: str
+    pcie_w_cur: str
+    pcie_w_max: str
+    driver: str
+    ecc_uncorr: int
+    ecc_corr: int
+    ecc_dram: int
+    viol_pwr_ns: int
+    viol_therm_ns: int
+
+
+def _f(x: str) -> float:
+    try:
+        return float(x)
+    except ValueError:
+        return 0.0
+
+
+def _i(x: str) -> int:
+    try:
+        return int(float(x))
+    except ValueError:
+        return 0
+
+
+def query() -> list[AIP]:
+    cmd = ["hl-smi", "-Q", ",".join(QUERY_FIELDS), "-f", "csv,noheader,nounits"]
+    try:
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=3)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    aips: list[AIP] = []
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < len(QUERY_FIELDS):
+            continue
+        aips.append(AIP(
+            index=_i(parts[0]),
+            module_id=_i(parts[1]),
+            name=parts[2],
+            bus_id=parts[3],
+            serial=parts[4],
+            temp=_f(parts[5]),
+            util=_f(parts[6]),
+            mem_util=_f(parts[7]),
+            mem_used=_f(parts[8]),
+            mem_free=_f(parts[9]),
+            mem_total=_f(parts[10]),
+            power=_f(parts[11]),
+            power_max=_f(parts[12]),
+            clock=_f(parts[13]),
+            clock_max=_f(parts[14]),
+            pcie_gen_cur=parts[15],
+            pcie_gen_max=parts[16],
+            pcie_w_cur=parts[17],
+            pcie_w_max=parts[18],
+            driver=parts[19],
+            ecc_uncorr=_i(parts[20]),
+            ecc_corr=_i(parts[21]),
+            ecc_dram=_i(parts[22]),
+            viol_pwr_ns=_i(parts[23]),
+            viol_therm_ns=_i(parts[24]),
+        ))
+    aips.sort(key=lambda a: a.index)
+    return aips
+
+
+# Rounded box drawing
+TL, TR, BL, BR, H, V = "╭", "╮", "╰", "╯", "─", "│"
+TEE_L, TEE_R = "├", "┤"
+
+
+def vis(s: str) -> int:
+    out, i = 0, 0
+    while i < len(s):
+        if s[i] == "\x1b":
+            while i < len(s) and s[i] != "m":
+                i += 1
+            i += 1
+        else:
+            out += 1
+            i += 1
+    return out
+
+
+def truncate_visible(s: str, width: int) -> str:
+    """Cut s so its visible length is <= width, preserving ANSI sequences."""
+    out, seen = [], 0
+    i = 0
+    while i < len(s):
+        if s[i] == "\x1b":
+            j = i
+            while j < len(s) and s[j] != "m":
+                j += 1
+            out.append(s[i:j + 1])
+            i = j + 1
+        else:
+            if seen >= width:
+                break
+            out.append(s[i])
+            seen += 1
+            i += 1
+    out.append(RESET)
+    return "".join(out)
+
+
+def pad_to(s: str, width: int) -> str:
+    actual = vis(s)
+    if actual == width:
+        return s
+    if actual < width:
+        return s + " " * (width - actual)
+    return truncate_visible(s, width)
+
+
+def short_bus(bus: str) -> str:
+    # 0000:19:00.0 -> 19:00.0
+    p = bus.split(":")
+    if len(p) >= 3:
+        return f"{p[1]}:{p[2]}"
+    return bus
+
+
+def fmt_health(a: AIP) -> str:
+    """Compact ECC + violation summary. Green when all ECC=0; red if any ECC
+    error is non-zero (uncorrected = critical, corrected = warning). Violations
+    are nanosecond cumulative throttle time → shown in seconds, dim normally,
+    yellow if non-trivial (>10s)."""
+    ecc_total = a.ecc_uncorr + a.ecc_corr + a.ecc_dram
+    if a.ecc_uncorr > 0:
+        ecc_color = C_HOT
+    elif a.ecc_corr > 0 or a.ecc_dram > 0:
+        ecc_color = C_WARN
+    else:
+        ecc_color = C_OK
+    ecc_str = (
+        f"{C_LABEL}ECC{RESET} "
+        f"{ecc_color}{a.ecc_uncorr}{C_DIM}/{ecc_color}{a.ecc_corr}{C_DIM}/{ecc_color}{a.ecc_dram}{RESET}"
+    )
+    pwr_s = a.viol_pwr_ns / 1e9
+    therm_s = a.viol_therm_ns / 1e9
+    v_color = C_HOT if therm_s > 1 else (C_WARN if pwr_s > 10 else C_DIM)
+    viol_str = (
+        f"{C_LABEL}vio{RESET} "
+        f"{v_color}{pwr_s:.0f}s{C_DIM}/{v_color}{therm_s:.0f}s{RESET}"
+    )
+    return f"{ecc_str} {viol_str}"
+
+
+def fmt_pcie(a: AIP) -> str:
+    cur_g, max_g = a.pcie_gen_cur, a.pcie_gen_max
+    cur_w, max_w = a.pcie_w_cur, a.pcie_w_max
+    if "N/A" in (cur_g, max_g, cur_w, max_w):
+        return f"{C_DIM}PCIe N/A{RESET}"
+    color = C_OK if (cur_g == max_g and cur_w == max_w) else C_WARN
+    return f"{C_LABEL}PCIe{RESET} {color}g{cur_g}x{cur_w}{RESET}"
+
+
+def render_aip_line(a: AIP, hist: deque, inner: int) -> str:
+    """Adaptive single-line render. Drops optional segments as width shrinks:
+    wide (≥150): everything; mid (≥120): no PCIe text; tight (≥100): drop
+    serial + mem%; very tight: drop sparkline too.
+    """
+    sep = f"{C_SEP}│{RESET}"
+    idx = f"{C_IDX}#{a.index}{RESET}"
+    mod = f"{C_MOD}M{a.module_id}{RESET}"
+    bus = f"{C_BUS}{short_bus(a.bus_id)}{RESET}"
+    sn = f"{C_SN}{a.serial}{RESET}"
+    temp = f"{C_LABEL}T{RESET} {temp_color(a.temp)}{int(a.temp):>2}°{RESET}"
+
+    clk_color = C_ACCENT if a.clock >= a.clock_max * 0.99 else C_WARN
+    clk = f"{C_LABEL}Clk{RESET} {clk_color}{int(a.clock):>4}{RESET}{C_DIM}MHz{RESET}"
+    pcie = fmt_pcie(a)
+
+    mem_pct = (a.mem_used / a.mem_total * 100.0) if a.mem_total else 0.0
+    pwr_pct = (a.power / a.power_max * 100.0) if a.power_max else 0.0
+
+    util_val = f"{gradient(a.util)}{a.util:5.1f}%{RESET}"
+    mem_val = f"{C_VALUE}{a.mem_used/1024:5.1f}{C_DIM}/{a.mem_total/1024:.0f}G{RESET}"
+    pwr_val = f"{C_VALUE}{int(a.power):>3}{C_DIM}/{int(a.power_max)}W{RESET}"
+    mem_pct_str = f"{gradient(mem_pct)}{mem_pct:4.1f}%{RESET}"
+
+    show_serial = inner >= 145
+    show_mem_pct = inner >= 160
+    show_pcie = inner >= 125
+    show_spark = inner >= 100
+    show_health = inner >= 140
+
+    # Build left identity block
+    left = f" {idx} {mod} {bus}"
+    if show_serial:
+        left += f" {sn}"
+    left += f" {sep} {temp} {sep} "
+
+    # Build right block (clock + optional PCIe + optional health)
+    right = f" {sep} {clk}"
+    if show_pcie:
+        right += f" {sep} {pcie}"
+    if show_health:
+        right += f" {sep} {fmt_health(a)}"
+    right += " "
+
+    # Middle: three bars with labels + values; calculate bar widths from leftover budget.
+    mid_static = f" U  {a.util:5.1f}% │  M  {a.mem_used/1024:5.1f}/{a.mem_total/1024:.0f}G"
+    if show_mem_pct:
+        mid_static += f" {mem_pct:4.1f}%"
+    mid_static += f" │  P  {int(a.power):>3}/{int(a.power_max)}W"
+    if show_spark:
+        mid_static += " │ "  # sparkline frame
+
+    # Use plain-string lengths for the static layout budget (color codes add 0 visible cols).
+    static_cost = vis(left) + vis(right) + len(mid_static) + 3  # +3 small fudge for separators in middle
+    budget = max(0, inner - static_cost)
+
+    if show_spark:
+        spark_w = max(8, budget // 5)
+        spark_w = min(spark_w, max(8, budget - 12))  # leave at least 12 for 3 bars
+        bar_budget = budget - spark_w
+        bw = max(3, bar_budget // 3)
+    else:
+        spark_w = 0
+        bw = max(3, budget // 3)
+
+    util_bar = bar(a.util, bw)
+    mem_bar = bar(mem_pct, bw)
+    pwr_bar = bar(pwr_pct, bw)
+
+    middle = (
+        f"{C_LABEL}U{RESET} {util_bar} {util_val} {sep} "
+        f"{C_LABEL}M{RESET} {mem_bar} {mem_val}"
+    )
+    if show_mem_pct:
+        middle += f" {mem_pct_str}"
+    middle += (
+        f" {sep} "
+        f"{C_LABEL}P{RESET} {pwr_bar} {pwr_val}"
+    )
+    if show_spark:
+        middle += f" {sep} {sparkline(hist, spark_w)}"
+
+    return pad_to(left + middle + right, inner)
+
+
+def get_primary_ip() -> str:
+    """Return the primary outbound IPv4 of this host without actually opening a
+    connection (UDP socket → just inspect getsockname). Falls back to 127.0.0.1."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def _probe_model_port(port: int, timeout: float = MODEL_PROBE_TIMEOUT) -> list[str]:
+    """If port has an OpenAI-compatible server, return its list of model IDs;
+    otherwise return []."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            pass
+    except (OSError, socket.timeout):
+        return []
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read())
+        return [m.get("id", "?") for m in data.get("data", []) if m.get("id")]
+    except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
+        return []
+
+
+def scan_models() -> list[tuple[str, int]]:
+    """Parallel-probe MODEL_SCAN_PORTS for /v1/models. Returns sorted list of
+    (model_id, port) tuples. Blocking calls run in threads with short timeouts
+    so total scan wall time stays ≲ 1s even with many closed ports."""
+    results: dict[int, list[str]] = {}
+    lock = threading.Lock()
+
+    def go(p: int) -> None:
+        ids = _probe_model_port(p)
+        if ids:
+            with lock:
+                results[p] = ids
+
+    threads = [
+        threading.Thread(target=go, args=(p,), daemon=True)
+        for p in MODEL_SCAN_PORTS
+    ]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + MODEL_PROBE_TIMEOUT * 3
+    for t in threads:
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    flat: list[tuple[str, int]] = []
+    for port, ids in results.items():
+        for mid in ids:
+            flat.append((mid, port))
+    flat.sort(key=lambda x: (x[1], x[0]))
+    return flat
+
+
+def load_daily_state() -> dict:
+    try:
+        data = json.loads(DAILY_FILE.read_text())
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_daily_state(state: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = DAILY_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(DAILY_FILE)
+    except OSError:
+        pass
+
+
+def update_daily_energy(state: dict, raw_total_w: float, now_ts: float) -> None:
+    """Integrate watt-seconds into the local calendar-day bucket → kWh. State
+    layout: {"YYYY-MM-DD": kwh_float, ..., "_last_ts": float}. We cap dt so a
+    process pause doesn't backfill stale power across the gap."""
+    last_ts = float(state.get("_last_ts", 0.0))
+    state["_last_ts"] = now_ts
+    if last_ts <= 0:
+        return  # first sample of this process — no dt yet
+    dt = now_ts - last_ts
+    if dt <= 0 or dt > DAILY_DT_CAP_SEC:
+        return
+    today = time.strftime("%Y-%m-%d", time.localtime(now_ts))
+    state[today] = float(state.get(today, 0.0)) + raw_total_w * dt / 3600.0 / 1000.0
+    # Prune anything older than DAILY_KEEP_DAYS so the file stays tiny.
+    cutoff = time.strftime(
+        "%Y-%m-%d", time.localtime(now_ts - DAILY_KEEP_DAYS * 86400)
+    )
+    for k in [k for k in state if k != "_last_ts" and k < cutoff]:
+        del state[k]
+
+
+def load_long_state() -> dict:
+    try:
+        data = json.loads(STATE_FILE.read_text())
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_long_state(state: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(STATE_FILE)
+    except OSError:
+        pass  # silent fallback: keep updating in memory
+
+
+def update_long_ewma(state: dict, raw_total: float, now: float) -> None:
+    """Advance every long-horizon EWMA by the elapsed wall time since its last
+    update, then incorporate the new raw aggregate-power sample. Dt is capped
+    so a process pause does not let one sample dominate the window.
+    """
+    for name, tau in LONG_HORIZONS:
+        s = state.get(name)
+        if not s or "ewma" not in s or "ts" not in s:
+            state[name] = {"ewma": float(raw_total), "ts": now}
+            continue
+        dt = now - float(s["ts"])
+        if dt <= 0:
+            continue
+        dt = min(dt, LONG_DT_CAP_SEC)
+        alpha = 1.0 - math.exp(-dt / tau)
+        s["ewma"] = alpha * raw_total + (1.0 - alpha) * float(s["ewma"])
+        s["ts"] = now
+
+
+def update_power_history(aips: list[AIP], raw_hist: deque, ewma_hist: deque) -> None:
+    """Append latest aggregate power draw and its EWMA. Called once per frame."""
+    if not aips:
+        return
+    total = sum(a.power for a in aips)
+    last_ewma = ewma_hist[-1] if ewma_hist else total
+    ewma = POWER_EWMA_ALPHA * total + (1.0 - POWER_EWMA_ALPHA) * last_ewma
+    raw_hist.append(total)
+    ewma_hist.append(ewma)
+
+
+# 9-level vertical block ramp (empty → full) for sub-row resolution.
+VBLOCKS = " ▁▂▃▄▅▆▇█"
+PEAK_CHAR = "•"
+
+
+def render_power_graph(
+    raw_hist: deque,
+    ewma_hist: deque,
+    total_max: float,
+    inner: int,
+    height: int,
+) -> list[str]:
+    """Multi-row chart of aggregate Gaudi power:
+      • gradient-filled EWMA column per x → the smoothed trend
+      • red `•` peak marker at the raw value when raw spikes above EWMA
+    Returns `height` strings each visually `inner` wide.
+    """
+    label_w = 7  # " XXXXW "
+    axis_w = 1   # "┤"
+    graph_w = max(10, inner - label_w - axis_w - 1)
+
+    if not raw_hist:
+        empty = " " * inner
+        return [empty for _ in range(height)]
+
+    raw = list(raw_hist)
+    ewma = list(ewma_hist)
+    n = len(raw)
+
+    # Bucket to graph_w columns; each column gets last-EWMA + max-raw of the slice.
+    cols_raw: list[float | None] = []
+    cols_ewma: list[float | None] = []
+    if n <= graph_w:
+        pad = graph_w - n
+        cols_raw = [None] * pad + raw
+        cols_ewma = [None] * pad + ewma
+    else:
+        step = n / graph_w
+        for x in range(graph_w):
+            i0 = int(x * step)
+            i1 = max(i0 + 1, int((x + 1) * step))
+            r_slice = raw[i0:i1]
+            e_slice = ewma[i0:i1]
+            cols_raw.append(max(r_slice) if r_slice else None)
+            cols_ewma.append(e_slice[-1] if e_slice else None)
+
+    # Y range: tight around observed values, with a little headroom + floor.
+    vals = [v for v in cols_raw + cols_ewma if v is not None]
+    if not vals:
+        empty = " " * inner
+        return [empty for _ in range(height)]
+    v_lo = min(vals)
+    v_hi = max(vals)
+    span = max(v_hi - v_lo, 1.0)
+    lo = max(0.0, v_lo - span * 0.08)
+    hi = v_hi + span * 0.12
+    span = hi - lo
+
+    total_px = height * 8
+
+    def to_px(v: float) -> int:
+        return max(0, min(total_px, int(round((v - lo) / span * total_px))))
+
+    # Pre-compute pixel heights per column for both series.
+    e_px = [to_px(v) if v is not None else None for v in cols_ewma]
+    r_px = [to_px(v) if v is not None else None for v in cols_raw]
+
+    # Color by % of theoretical aggregate max (e.g. 8×850W=6800W) so the bar
+    # turns green→red as you approach the rail, not as a function of window range.
+    def color_for(v: float) -> str:
+        if total_max <= 0:
+            return gradient(50)
+        return gradient(v / total_max * 100.0)
+
+    rows_out: list[str] = []
+    for r in range(height):
+        cell_bot = (height - r - 1) * 8
+        cell_top = (height - r) * 8
+
+        # Y-axis label: top/mid/bottom only
+        if r == 0:
+            lbl_text = f"{int(hi):>5}W "
+            lbl = f"{C_LABEL}{lbl_text}{RESET}"
+        elif r == height - 1:
+            lbl_text = f"{int(lo):>5}W "
+            lbl = f"{C_DIM}{lbl_text}{RESET}"
+        elif r == height // 2:
+            mid = int((hi + lo) / 2)
+            lbl = f"{C_DIM}{mid:>5}W {RESET}"
+        else:
+            lbl = "       "
+
+        axis = f"{C_FRAME}┤{RESET}"
+
+        parts = [lbl, axis]
+        for x in range(graph_w):
+            eh = e_px[x]
+            rh = r_px[x]
+            cell = " "
+            color = ""
+
+            if eh is not None:
+                if eh >= cell_top:
+                    cell = "█"
+                    color = color_for(cols_ewma[x])  # type: ignore[arg-type]
+                elif eh > cell_bot:
+                    cell = VBLOCKS[eh - cell_bot]
+                    color = color_for(cols_ewma[x])  # type: ignore[arg-type]
+
+            # Peak overlay: dot at the raw pixel height, but only in cells the
+            # EWMA fill does NOT occupy — otherwise the dots speckle the bars.
+            if (
+                rh is not None and eh is not None
+                and cols_raw[x] is not None and cols_ewma[x] is not None
+                and cols_raw[x] > cols_ewma[x] * POWER_PEAK_MARGIN  # type: ignore[operator]
+                and cell_bot <= rh < cell_top
+                and cell_bot >= eh  # this cell is entirely above the EWMA top
+            ):
+                cell = PEAK_CHAR
+                color = C_HOT
+
+            parts.append(color + cell + RESET if color else cell)
+
+        rows_out.append(pad_to("".join(parts), inner))
+
+    return rows_out
+
+
+def render_header(aips: list[AIP], inner: int) -> list[str]:
+    ts = time.strftime("%H:%M:%S")
+    if not aips:
+        msg = f"{C_HOT}no AIPs detected — is the driver loaded?{RESET}"
+        return [pad_to(" " + msg, inner)]
+
+    n = len(aips)
+    name = aips[0].name
+    drv = aips[0].driver
+    total_pwr = sum(a.power for a in aips)
+    total_pwr_max = sum(a.power_max for a in aips)
+    avg_util = sum(a.util for a in aips) / n
+    avg_temp = sum(a.temp for a in aips) / n
+    hot = max(a.temp for a in aips)
+    used_g = sum(a.mem_used for a in aips) / 1024
+    total_g = sum(a.mem_total for a in aips) / 1024
+
+    # Build segments in priority order; emit only those that fit.
+    title_seg = (
+        f" {C_TITLE}GAUDI{RESET}{C_ACCENT}3{RESET} "
+        f"{C_DIM}⬢{RESET} {BOLD}{n}× {name}{RESET}"
+    )
+    drv_seg = f" {C_DIM}⬢{RESET} {C_LABEL}drv{RESET} {C_VALUE}{drv}{RESET}"
+    util_seg = f" {C_DIM}⬢{RESET} {C_LABEL}Σutil{RESET} {gradient(avg_util)}{avg_util:5.1f}%{RESET}"
+    mem_seg = f"  {C_LABEL}Σmem{RESET} {C_VALUE}{used_g:6.1f}{C_DIM}/{total_g:.0f}G{RESET}"
+    pwr_seg = (
+        f"  {C_LABEL}Σpwr{RESET} {gradient(total_pwr/total_pwr_max*100 if total_pwr_max else 0)}"
+        f"{int(total_pwr):>4}W{RESET}{C_DIM}/{int(total_pwr_max)}W{RESET}"
+    )
+    temp_seg = (
+        f"  {C_LABEL}T{RESET} avg {temp_color(avg_temp)}{int(avg_temp)}°{RESET}"
+        f" hot {temp_color(hot)}{int(hot)}°{RESET}"
+    )
+    ts_seg = f" {C_DIM}{ts}{RESET} "
+
+    # Mandatory: title + util + ts. Add others while there's room.
+    mandatory = [title_seg, util_seg]
+    optional = [drv_seg, mem_seg, pwr_seg, temp_seg]
+    chosen = list(mandatory)
+    base_cost = sum(vis(s) for s in chosen) + vis(ts_seg)
+    for seg in optional:
+        if base_cost + vis(seg) <= inner - 2:
+            chosen.append(seg)
+            base_cost += vis(seg)
+
+    # Re-order chosen so it reads naturally: title, drv, util, mem, pwr, temp
+    order = [title_seg, drv_seg, util_seg, mem_seg, pwr_seg, temp_seg]
+    chosen = [s for s in order if s in chosen]
+
+    left_block = "".join(chosen)
+    gap = inner - vis(left_block) - vis(ts_seg)
+    if gap < 1:
+        gap = 1
+    return [pad_to(left_block + " " * gap + ts_seg, inner)]
+
+
+def render_models_line(models: list[tuple[str, int]], host_ip: str, inner: int) -> str:
+    """One-line summary of detected OpenAI-compatible model servers."""
+    label = f" {C_TITLE}Models{RESET}  "
+    if not models:
+        body = f"{C_DIM}─ no /v1/models endpoints detected on common ports ─{RESET}"
+        return pad_to(label + body, inner)
+    sep = f"  {C_DIM}·{RESET}  "
+    parts = []
+    for mid, port in models:
+        parts.append(
+            f"{C_ACCENT}⬢{RESET} {BOLD}{mid}{RESET} "
+            f"{C_DIM}@{RESET} {C_VALUE}{host_ip}{C_DIM}:{RESET}{C_VALUE}{port}{RESET}"
+        )
+    return pad_to(label + sep.join(parts), inner)
+
+
+def render_long_ewma_line(long_state: dict, daily_state: dict, inner: int) -> str:
+    """Single-line summary: persisted long-horizon EWMAs + today's / yesterday's
+    actual kWh totals (integrated from raw samples) + a forward-looking kWh/day
+    estimate from the 24h EWMA. Horizons not warmed up render as a dim dash."""
+    sep = f" {C_DIM}·{RESET} "
+    label = f" {C_LABEL}EWMA{RESET}  "
+    parts = []
+    for name, _tau in LONG_HORIZONS:
+        s = long_state.get(name)
+        if not s or "ewma" not in s:
+            parts.append(f"{C_DIM}{name} ─{RESET}")
+            continue
+        v = int(s["ewma"])
+        parts.append(f"{C_ACCENT}{name}{RESET} {C_VALUE}{v:>4}W{RESET}")
+
+    # Today + yesterday integrated kWh
+    now = time.time()
+    today_key = time.strftime("%Y-%m-%d", time.localtime(now))
+    yest_key = time.strftime("%Y-%m-%d", time.localtime(now - 86400))
+    today_kwh = float(daily_state.get(today_key, 0.0))
+    yest_kwh = float(daily_state.get(yest_key, 0.0))
+    parts.append(
+        f"{C_LABEL}today{RESET} {gradient(min(100, today_kwh/2.0))}"
+        f"{today_kwh:5.1f}{RESET}{C_DIM} kWh{RESET}"
+    )
+    if yest_key in daily_state:
+        parts.append(
+            f"{C_LABEL}yest{RESET} {C_VALUE}{yest_kwh:5.1f}{RESET}{C_DIM} kWh{RESET}"
+        )
+
+    # Forward-looking projection from longest warmed-up EWMA
+    energy_basis = None
+    for name in ("24h", "8h", "2h", "1h"):
+        s = long_state.get(name)
+        if s and "ewma" in s:
+            energy_basis = (name, s["ewma"])
+            break
+    if energy_basis is not None:
+        basis_name, basis_w = energy_basis
+        kwh_day = basis_w * 24.0 / 1000.0
+        parts.append(
+            f"{C_LABEL}≈{RESET} {gradient(min(100, basis_w/68.0))}{kwh_day:5.1f}{RESET}"
+            f"{C_DIM} kWh/day ({basis_name}){RESET}"
+        )
+    return pad_to(label + sep.join(parts), inner)
+
+
+def render(
+    aips: list[AIP],
+    histories: dict[int, deque],
+    power_raw: deque,
+    power_ewma: deque,
+    long_state: dict,
+    daily_state: dict,
+    models: list[tuple[str, int]],
+    host_ip: str,
+    cols: int,
+    rows: int,
+) -> str:
+    inner = max(40, cols - 2)
+    buf = [HOME]
+
+    # Top border with embedded title
+    title_chip = f" {C_TITLE}hl-top-mini{RESET} {C_DIM}· compact gaudi monitor{RESET} "
+    title_w = vis(title_chip)
+    side = max(2, (inner - title_w) // 2)
+    rest = inner - title_w - side
+    top = (
+        C_FRAME + TL + H * side + RESET + title_chip
+        + C_FRAME + H * rest + TR + RESET
+    )
+    buf.append(top + CSI + "K\n")
+
+    # Header content rows
+    for line in render_header(aips, inner):
+        buf.append(C_FRAME + V + RESET + line + C_FRAME + V + RESET + CSI + "K\n")
+
+    # Separator
+    buf.append(C_FRAME + TEE_L + H * inner + TEE_R + RESET + CSI + "K\n")
+
+    # AIP rows
+    if not aips:
+        empty = pad_to(f" {C_DIM}waiting for hl-smi…{RESET}", inner)
+        buf.append(C_FRAME + V + RESET + empty + C_FRAME + V + RESET + CSI + "K\n")
+    else:
+        for a in aips:
+            h = histories.setdefault(a.index, deque(maxlen=HISTORY))
+            h.append(a.util)
+            line = render_aip_line(a, h, inner)
+            buf.append(C_FRAME + V + RESET + line + C_FRAME + V + RESET + CSI + "K\n")
+
+    graph_rows_used = 0
+    if aips and len(power_raw) >= 1:
+        # Section separator
+        buf.append(C_FRAME + TEE_L + H * inner + TEE_R + RESET + CSI + "K\n")
+        # Models row (detected OpenAI-compatible endpoints, scanned in main loop)
+        models_line = render_models_line(models, host_ip, inner)
+        buf.append(C_FRAME + V + RESET + models_line + C_FRAME + V + RESET + CSI + "K\n")
+        # Title row
+        last_raw = power_raw[-1]
+        last_ewma = power_ewma[-1]
+        peak_w = max(power_raw)
+        total_max = sum(a.power_max for a in aips)
+        title = (
+            f" {C_TITLE}Σ Power{RESET} {C_DIM}·{RESET} "
+            f"{C_LABEL}EWMA{RESET} {gradient(last_ewma/total_max*100 if total_max else 0)}"
+            f"{int(last_ewma):>4}W{RESET} "
+            f"{C_DIM}·{RESET} {C_LABEL}now{RESET} {C_VALUE}{int(last_raw):>4}W{RESET} "
+            f"{C_DIM}·{RESET} {C_LABEL}peak{RESET} {C_HOT}{int(peak_w):>4}W{RESET} "
+            f"{C_DIM}·{RESET} {C_LABEL}max{RESET} {C_DIM}{int(total_max)}W{RESET} "
+            f"{C_DIM}·{RESET} {C_DIM}{len(power_raw)}s history · α={POWER_EWMA_ALPHA:.2f}{RESET}"
+        )
+        buf.append(C_FRAME + V + RESET + pad_to(title, inner) + C_FRAME + V + RESET + CSI + "K\n")
+        # Long-horizon EWMA summary line (+ today / yesterday actual kWh)
+        long_line = render_long_ewma_line(long_state, daily_state, inner)
+        buf.append(C_FRAME + V + RESET + long_line + C_FRAME + V + RESET + CSI + "K\n")
+        # Graph body
+        gh = min(POWER_GRAPH_ROWS, max(2, rows - (1 + 1 + 1 + len(aips) + 1 + 1 + 1 + 1 + 1 + 1)))
+        for line in render_power_graph(power_raw, power_ewma, total_max, inner, gh):
+            buf.append(C_FRAME + V + RESET + line + C_FRAME + V + RESET + CSI + "K\n")
+        graph_rows_used = 1 + 1 + 1 + 1 + gh  # sep + models + title + long-ewma + graph
+
+    # Bottom border
+    bottom = C_FRAME + BL + H * inner + BR + RESET
+    buf.append(bottom + CSI + "K\n")
+
+    # Footer: controls on the left, static bold-red credit on the right.
+    left_msg = (
+        f" {C_DIM}q{RESET}{C_LABEL} quit{RESET}  "
+        f"{C_DIM}refresh {REFRESH_SEC:.1f}s{RESET}  "
+        f"{C_DIM}cols={cols}{RESET}"
+    )
+    credit_plain = "made by Satyajit Bhuyan ⟨satyajit.bhuyan@intel.com⟩ "
+    credit_colored = f"{BOLD}{fg(235, 65, 75)}{credit_plain}{RESET}"
+    gap = cols - vis(left_msg) - len(credit_plain)
+    if gap < 1:
+        gap = 1
+    footer = left_msg + " " * gap + credit_colored
+    buf.append(pad_to(footer, cols) + CSI + "K")  # clipped to cols, no trailing \n
+
+    # Wipe any leftover rows from a previous (taller) frame, then wrap the
+    # whole frame in synchronized-output mode so the terminal swaps the
+    # buffer atomically (no flicker / partial repaints).
+    body = "".join(buf) + ERASE_DOWN
+    return SYNC_BEGIN + body + SYNC_END
+
+
+class NonBlockingInput:
+    def __enter__(self):
+        import termios
+        self.fd = sys.stdin.fileno()
+        try:
+            self.old = termios.tcgetattr(self.fd)
+        except termios.error:
+            self.old = None
+            return self
+        new = termios.tcgetattr(self.fd)
+        new[3] = new[3] & ~(termios.ICANON | termios.ECHO)
+        termios.tcsetattr(self.fd, termios.TCSADRAIN, new)
+        return self
+
+    def wait_for_key(self, timeout: float) -> str:
+        import select
+        if self.old is None or timeout <= 0:
+            return ""
+        r, _, _ = select.select([self.fd], [], [], timeout)
+        if not r:
+            return ""
+        try:
+            return os.read(self.fd, 64).decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def __exit__(self, *exc):
+        import termios
+        if self.old is not None:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
+            except Exception:
+                pass
+
+
+def cleanup():
+    sys.stdout.write(CURSOR_SHOW + ALT_OFF + RESET)
+    sys.stdout.flush()
+
+
+def main() -> int:
+    histories: dict[int, deque] = {}
+    power_raw: deque = deque(maxlen=POWER_HISTORY)
+    power_ewma: deque = deque(maxlen=POWER_HISTORY)
+    long_state: dict = load_long_state()
+    daily_state: dict = load_daily_state()
+    last_save = time.monotonic()
+    host_ip = get_primary_ip()
+
+    # Background model scanner: result list + lock + thread handle. The thread
+    # sleeps MODEL_SCAN_INTERVAL_SEC between scans so we don't probe every tick.
+    models_lock = threading.Lock()
+    models: list[tuple[str, int]] = []
+    stop_event = threading.Event()
+
+    def model_scanner() -> None:
+        nonlocal models
+        while not stop_event.is_set():
+            found = scan_models()
+            with models_lock:
+                models = found
+            if stop_event.wait(MODEL_SCAN_INTERVAL_SEC):
+                return
+
+    scanner_thread = threading.Thread(target=model_scanner, daemon=True)
+    scanner_thread.start()
+
+    sys.stdout.write(ALT_ON + CURSOR_HIDE + CLEAR)
+    sys.stdout.flush()
+
+    def on_signal(signum, frame):
+        save_long_state(long_state)
+        save_daily_state(daily_state)
+        stop_event.set()
+        cleanup()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    try:
+        with NonBlockingInput() as kb:
+            while True:
+                cols, rows = shutil.get_terminal_size((120, 30))
+                aips = query()
+                update_power_history(aips, power_raw, power_ewma)
+                if aips:
+                    total_w = sum(a.power for a in aips)
+                    now_ts = time.time()
+                    update_long_ewma(long_state, total_w, now_ts)
+                    update_daily_energy(daily_state, total_w, now_ts)
+                if time.monotonic() - last_save >= LONG_SAVE_INTERVAL_SEC:
+                    save_long_state(long_state)
+                    save_daily_state(daily_state)
+                    last_save = time.monotonic()
+                with models_lock:
+                    models_snapshot = list(models)
+                sys.stdout.write(render(
+                    aips, histories, power_raw, power_ewma,
+                    long_state, daily_state, models_snapshot, host_ip,
+                    cols, rows,
+                ))
+                sys.stdout.flush()
+
+                deadline = time.monotonic() + REFRESH_SEC
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    keys = kb.wait_for_key(min(0.25, remaining))
+                    if keys and ("q" in keys or "Q" in keys or "\x03" in keys):
+                        save_long_state(long_state)
+                        save_daily_state(daily_state)
+                        stop_event.set()
+                        return 0
+    finally:
+        save_long_state(long_state)
+        save_daily_state(daily_state)
+        stop_event.set()
+        cleanup()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
