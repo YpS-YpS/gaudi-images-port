@@ -1,6 +1,6 @@
 # GLM-5.2 Phase 2 Plan — MTP Speculative Decoding + Long Context
 
-**Status:** IN PROGRESS (2026-07-17). Baseline: `vllm-glm52` from baked image
+**Status:** COMPLETE (2026-07-17) — see Outcome below. Baseline: `vllm-glm52` from baked image
 `gaudi-vllm-glm52:0.19.0`, TP8, port 8010, `--max-model-len 8192`, ~20–23 tok/s
 single-stream. See [GLM52.md](GLM52.md) for the force-dense bring-up story.
 
@@ -34,7 +34,18 @@ single-stream. See [GLM52.md](GLM52.md) for the force-dense bring-up story.
    bind-mounts), `bin/glm52-launch` updated, GLM52.md updated with results,
    this plan file updated with outcomes.
 
-## Outcome
+## Outcome (2026-07-17)
 
-_To be filled when the runs complete: MTP verdict, tok/s before/after,
-acceptance rate, prefill timing, needle accuracy table, final shipped config._
+- **MTP:** SUPPORTED on HPU, **greedy-only**. Routes via Eagle proposer; needed
+  `patch_glm52_force_dense_mtp.py` (draft-config qk_rope=64 repair + layer-78
+  indexer skip) and `--no-async-scheduling`. **nspec=3: ~32 tok/s (1.55× over
+  ~20), acceptance length ~2.15**; nspec=5 slower (~29). `temperature>0` crashes
+  the HPU rejection sampler (padded-batch mismatch) → opt-in via
+  `glm52-launch mtp`, NOT default. Future lead: `disable_padded_drafter_batch`.
+- **Context:** **64K shipped** (`--max-model-len 65536 --max-num-seqs 8`, dense).
+  Needle sweep **4/4 at 4K / 8K / 16K / 30K**; 60,680-token prompt prefilled OK.
+  Cold dense prefill ~2,280 tok/s (30K ≈ 13 s); decode ~20 tok/s; 4.78×
+  concurrency at full 64K.
+- **Shipped:** image `gaudi-vllm-glm52:0.19.0` rebuilt with both patches baked;
+  `bin/glm52-launch` defaults to 64K with an `mtp` subcommand; details in
+  [GLM52.md](GLM52.md).

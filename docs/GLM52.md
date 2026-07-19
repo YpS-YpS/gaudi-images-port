@@ -219,21 +219,62 @@ cache volume):
 > **Thinking model — `max_tokens` must be ≥ 512.** GLM-5.2 emits a reasoning channel
 > first; a small budget gets consumed by reasoning and returns empty/truncated content.
 
+## Phase 2 (2026-07-17): 64K context — validated and now the default
+
+The 8K first-boot cap is history. The shipped config is **dense, `--max-model-len 65536`,
+`--max-num-seqs 8`** (see [GLM52-mtp-longctx-plan.md](GLM52-mtp-longctx-plan.md) for the
+protocol). Evidence:
+
+- **Needle-in-haystack, 4 needles per depth, distractor-heavy, temperature=0:**
+  **4/4 at 4K (5,637 tok), 8K (11,434), 16K (16,508), and 30K (30,252)** — force-dense
+  holds retrieval quality 15× beyond its theoretically-exact 2048 boundary.
+- **Full 64K path proven:** a 60,680-token prompt prefilled successfully.
+- **Cold dense prefill ≈ 2,280 tok/s** — the honest O(n²) price: a 30K prompt
+  cold-prefills in ~13 s. Decode unchanged at ~20 tok/s.
+- **Long code-review prompt:** coherent and accurate (flagged a SQL injection, a cache
+  race, and a TOCTOU in review-style input).
+- KV pool unchanged (313,472 tokens, HBM-bound) → 4.78× concurrency at full 64K/req.
+
+## MTP speculative decoding — works, greedy-only (opt-in via `glm52-launch mtp`)
+
+MTP is *not* in vllm-gaudi 0.19's supported list, but `mtp` ∈ vLLM's `EagleModelTypes`
+routes it through the HPU **Eagle proposer**, which is implemented. Two more patches were
+needed (baked as `patch_glm52_force_dense_mtp.py`, marker `GLM52_FORCE_DENSE_MTP`, 3 hunks
+in `deepseek_mtp.py`):
+
+1. **Draft-config `qk_rope_head_dim` repair** — `SpeculativeConfig` rebuilds the draft
+   ModelConfig without the main model's `--hf-overrides`, so the MTP draft kept the
+   clobbered 192 and crashed at load (`start (0) + length (704) exceeds dimension size
+   (576)`). The patch forces 64 on the draft config.
+2. **Layer-78 indexer skip** — same `.self_attn.indexer.*` KeyError class as the main
+   model, in `DeepSeekMTP.load_weights`.
+3. Requires **`--no-async-scheduling`** (vllm-gaudi asserts async off with spec decode).
+
+Measured (greedy): **`num_speculative_tokens=3` → ~32 tok/s (1.55× over ~20)**, mean
+acceptance length ~2.15, per-position acceptance 0.66/0.37/0.14. `nspec=5` is *slower*
+(~29 tok/s) — GLM-5.2 has a single MTP layer reused autoregressively, so positions 4-5
+accept at ≈0.
+
+> **⚠️ Greedy-only.** `temperature>0` crashes the HPU rejection sampler
+> (`expand_batch_to_tokens` batch-size assert — HPU pads the decode batch so the
+> temperature batch ≠ `cu_num_draft_tokens`). Do **not** enable MTP for sampling
+> workloads. Untested lead for a future fix: `disable_padded_drafter_batch` in the
+> speculative config.
+
 ## Limits & open items
 
-- **8K configured, 1M is not real here.** `--max-model-len 8192` is a deliberate cap.
-  True 1M context needs the **real DSA indexer kernels**, which HPU doesn't have —
-  force-dense's cost is quadratic and its equivalence is only exact ≤ 2048 tokens.
-- **Quality beyond 2048 is empirical.** Coherent at 3.1k in spot checks, but the
-  configured 8K is *unvalidated*. **Run a long-context / needle sweep (2k→8k) before
-  trusting 8K** for anything load-bearing.
-- **MTP speculative decoding is untested.** GLM-5.2 ships a multi-token-prediction head
-  (layer 78); it's currently skipped. Enabling MTP speculative decoding is a plausible
-  future speedup over the ~20 tok/s single-stream baseline.
+- **1M is still not real here.** True 1M context needs the **real DSA indexer kernels**,
+  which HPU doesn't have. 64K is validated (needles 4/4 to 30K); a broader adversarial
+  multi-needle sweep at the full 64K would further harden the trust boundary.
+- **MTP for sampling workloads** — blocked on the HPU rejection-sampler padding bug
+  (see above); greedy opt-in only.
 - **Real warmup.** Booted with `VLLM_SKIP_WARMUP=true`; a real bucket pre-warm would
   give a production profile and kill first-shape JIT recompiles.
 - **Tool-calling** (`glm47` parser + `--enable-auto-tool-choice`) is wired but not yet
   validated end-to-end.
+- **Root-cause worth remembering:** transformers 5.7.0 `GlmMoeDsaConfig.attribute_map
+  {"head_dim": "qk_rope_head_dim"}` clobbers qk_rope 64→192 — the main model fixes it
+  via `--hf-overrides`, the MTP draft via patch 2.
 
 ## Credits / lineage
 

@@ -50,4 +50,20 @@ RUN python3 /tmp/patch_glm52_force_dense.py \
                 assert 'continue  # GLM52_FORCE_DENSE' in src, 'hunk 3b (indexer skip) missing'; \
                 print('OK patch 1 - GLM52_FORCE_DENSE: all 3 hunks present (dense MLA, indexer dropped)')"
 
+# Patch 2 — GLM52_FORCE_DENSE_MTP: 3 hunks in vLLM's deepseek_mtp.py so the MTP
+# (multi-token-predict) draft model also runs dense on HPU. OPT-IN: only engaged
+# when launched with --speculative-config '{"method":"mtp",...}' + --no-async-scheduling;
+# a pure no-op otherwise. Fixes (a) the draft-config qk_rope_head_dim=64 clobber that
+# --hf-overrides can't reach, and (b) the layer-78 self_attn.indexer.* KeyError.
+# NOTE: MTP is greedy-only on this stack (temperature>0 hits an HPU rejection-sampler
+# assert). Idempotent + self-asserting like patch 1.
+COPY patch_glm52_force_dense_mtp.py /tmp/patch_glm52_force_dense_mtp.py
+RUN python3 /tmp/patch_glm52_force_dense_mtp.py \
+ && python3 -c "import inspect, vllm.model_executor.models.deepseek_mtp as d; \
+                src = inspect.getsource(d); \
+                assert 'import os  # GLM52_FORCE_DENSE_MTP' in src, 'mtp hunk 1 (import os) missing'; \
+                assert 'config.qk_rope_head_dim = 64  # GLM52_FORCE_DENSE_MTP' in src, 'mtp hunk 2 (qk_rope fix) missing'; \
+                assert 'continue  # GLM52_FORCE_DENSE_MTP' in src, 'mtp hunk 3 (indexer skip) missing'; \
+                print('OK patch 2 - GLM52_FORCE_DENSE_MTP: all 3 hunks present (dense MTP draft)')"
+
 WORKDIR /root/scripts

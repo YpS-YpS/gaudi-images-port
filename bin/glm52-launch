@@ -16,9 +16,21 @@
 #
 # Usage:
 #   glm52-launch            # start (or restart) GLM-5.2 on port 8010, all 8 cards
+#                           # dense, 64K context — robust for all sampling temps
+#   glm52-launch mtp        # start with MTP speculative decoding (GREEDY-ONLY,
+#                           # ~1.55x decode at temperature=0; crashes at temp>0)
 #   glm52-launch stop       # stop + remove the container
 #   glm52-launch logs       # follow logs
 #   glm52-launch smoke      # run the 3 smoke checks (models + text + code)
+#
+# Context: dense force-dense MLA. Validated needle-in-haystack 4/4 at 4K/8K/16K/30K,
+# 60K prefill OK, cold dense prefill ~2280 tok/s (30K prompt ~13s), decode ~20 tok/s.
+#
+# MTP (opt-in): method=mtp routes glm_moe_dsa->deepseek_mtp->DeepSeekMTP via the HPU
+# eagle proposer. num_speculative_tokens=3 is optimal (GLM-5.2 has 1 MTP layer;
+# nspec>3 lowers acceptance). ~32 tok/s greedy (mean acceptance length ~2.15).
+# LIMITATION: temperature>0 crashes in the HPU rejection sampler — MTP is greedy-only.
+# Needs the baked GLM52_FORCE_DENSE_MTP patch + --no-async-scheduling (both handled here).
 set -euo pipefail
 
 IMAGE="gaudi-vllm-glm52:0.19.0"
@@ -31,6 +43,14 @@ HF_CACHE=/home/satyajit-gaudi/hf-cache
 G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
 
 start() {
+  local mode="${1:-dense}"   # dense | mtp
+  local SPEC_ARGS=()
+  if [[ "$mode" == "mtp" ]]; then
+    # MTP speculative decoding — GREEDY-ONLY (temperature>0 crashes on HPU 0.19).
+    # num_speculative_tokens=3 optimal; --no-async-scheduling required on vllm_gaudi.
+    SPEC_ARGS=(--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' --no-async-scheduling)
+    echo -e "${R}MODE:${N}    MTP speculative decoding (GREEDY-ONLY — use temperature=0)"
+  fi
   echo -e "${B}image:${N}   $IMAGE"
   echo -e "${B}model:${N}   $MODEL   ${B}TP:${N} 8 (cards 0-7)   ${B}port:${N} $PORT"
 
@@ -64,11 +84,12 @@ start() {
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --block-size 128 \
-      --max-model-len 8192 \
-      --max-num-seqs 4 \
+      --max-model-len 65536 \
+      --max-num-seqs 8 \
       --gpu-memory-utilization 0.85 \
       --trust-remote-code \
       --hf-overrides '{"qk_rope_head_dim": 64}' \
+      "${SPEC_ARGS[@]}" \
       --served-model-name "$SERVED" \
       --port "$PORT" \
       --tool-call-parser glm47 \
@@ -107,9 +128,10 @@ smoke() {
 }
 
 case "${1:-start}" in
-  start|"") start ;;
+  start|"") start dense ;;
+  mtp)      start mtp ;;
   stop)     stop ;;
   logs)     logs ;;
   smoke)    smoke ;;
-  *)        echo "usage: $0 {start|stop|logs|smoke}"; exit 1 ;;
+  *)        echo "usage: $0 {start|mtp|stop|logs|smoke}"; exit 1 ;;
 esac
