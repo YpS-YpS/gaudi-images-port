@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# sglang-launch — launch a preset on Gaudi via SGLang.
+#
+# Uses HabanaAI/sglang-fork (frozen at 1.22.0, sglang 0.4.9) — the canonical
+# public SGLang-on-Gaudi codebase. Upstream sgl-project/sglang doesn't work on
+# HPU because it has hard CUDA dependencies (sgl_kernel, flashinfer).
+#
+# Current quality status (May 2026): partial success — prefill is correct;
+# decode produces ~7 coherent tokens then degrades to repeating-token gibberish.
+# Documented in docs/SGLANG.md.
+#
+# Mirrors bin/vllm-launch's preset structure. SGLang uses port 30000+, so
+# coexists fine with the vLLM endpoints on 8000-8007.
+#
+# Usage:
+#   ./sglang-launch <preset>          # start preset
+#   ./sglang-launch list              # list presets
+#   ./sglang-launch stop <preset>     # stop one
+#   ./sglang-launch stop-all          # stop every sglang-* container
+#   ./sglang-launch logs <preset>     # follow logs
+#
+# Env overrides (parallel to vllm-launch):
+#   LAUNCH_DEVICES="0,4"   override card selection (tp-size auto-derives)
+#   LAUNCH_PORT=30500      override port (for conflict avoidance)
+set -euo pipefail
+
+DEFAULT_IMAGE='gaudi-sglang:1.22.0'
+HF_CACHE=/home/satyajit-gaudi/hf-cache
+
+# preset|model|TP|devices|port|context-len[|image]   image optional
+declare -A PRESETS=(
+  # Llama-3.1-8B base — Habana SGLang docs canonical example model.
+  # NousResearch mirror = ungated copy of meta-llama/Meta-Llama-3.1-8B.
+  [llama-3.1-8b]="NousResearch/Meta-Llama-3.1-8B|1|0|30000|32768"
+)
+
+G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
+
+list() {
+  printf "${B}preset            model                                          TP  devices    port${N}\n"
+  for p in "${!PRESETS[@]}"; do
+    IFS='|' read -r model tp dev port ctxlen <<<"${PRESETS[$p]}"
+    printf "%-17s %-46s  %s  %-9s  %s\n" "$p" "$model" "$tp" "$dev" "$port"
+  done | sort
+}
+
+start() {
+  local preset=$1
+  [[ -z "${PRESETS[$preset]:-}" ]] && { echo -e "${R}unknown preset:${N} $preset"; list; exit 1; }
+  IFS='|' read -r MODEL TP DEVICES PORT CTXLEN PRESET_IMAGE <<<"${PRESETS[$preset]}"
+  local CONTAINER="sglang-$preset"
+  local IMAGE="${PRESET_IMAGE:-$DEFAULT_IMAGE}"
+
+  if [[ -n "${LAUNCH_DEVICES:-}" ]]; then
+    DEVICES="$LAUNCH_DEVICES"
+    TP=$(awk -F',' '{print NF}' <<<"$DEVICES")
+    CONTAINER="sglang-$preset-c${DEVICES//,/_}"
+  fi
+  if [[ -n "${LAUNCH_PORT:-}" ]]; then
+    PORT="$LAUNCH_PORT"
+  fi
+
+  local SERVED_NAME="$preset"
+
+  echo -e "${B}preset:${N}   $preset"
+  echo -e "${B}model:${N}    $MODEL"
+  echo -e "${B}TP:${N}       $TP   ${B}devices:${N} $DEVICES   ${B}port:${N} $PORT   ${B}ctx-len:${N} $CTXLEN"
+
+  docker rm -f "$CONTAINER" 2>/dev/null || true
+
+  # SGLANG_HPU_SKIP_WARMUP=true bypasses the HPU graph capture that crashes
+  # with synStatus 26 on this stack. NO_PROXY includes 0.0.0.0 so sglang's
+  # internal http-self-warmup doesn't get blocked by the corp proxy.
+  docker run -d \
+    --name "$CONTAINER" \
+    --runtime=habana \
+    --restart unless-stopped \
+    --entrypoint /bin/bash \
+    -e HABANA_VISIBLE_DEVICES="$DEVICES" \
+    -e OMPI_MCA_btl_vader_single_copy_mechanism=none \
+    -e PT_HPU_LAZY_MODE=0 \
+    -e SGLANG_HPU_SKIP_WARMUP=true \
+    -e HF_HOME=/root/.cache/huggingface \
+    -e HTTP_PROXY=http://proxy-dmz.intel.com:912 \
+    -e HTTPS_PROXY=http://proxy-dmz.intel.com:912 \
+    -e NO_PROXY='localhost,127.0.0.1,0.0.0.0,::1,.intel.com,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,host.docker.internal' \
+    -e no_proxy='localhost,127.0.0.1,0.0.0.0,::1,.intel.com,10.0.0.0/8,192.168.0.0/16,172.16.0.0/12,host.docker.internal' \
+    --cap-add=sys_nice \
+    --net=host \
+    --ipc=host \
+    -v "$HF_CACHE:/root/.cache/huggingface" \
+    "$IMAGE" \
+    -lc "exec python3 -m sglang.launch_server \
+          --model-path '$MODEL' \
+          --host 0.0.0.0 \
+          --port $PORT \
+          --tp-size $TP \
+          --dtype bfloat16 \
+          --context-length $CTXLEN \
+          --trust-remote-code \
+          --served-model-name $SERVED_NAME"
+
+  echo -e "${G}started:${N}  $CONTAINER"
+  echo -e "${B}API:${N}      http://localhost:$PORT/v1   (OpenAI-compat)"
+  echo -e "${B}native:${N}   http://localhost:$PORT/generate"
+  echo -e "${B}logs:${N}     $0 logs $preset"
+  echo -e "${B}stop:${N}     $0 stop $preset"
+  echo -e "${B}warmup:${N}   first launch loads weights — ~3-5 min for 8B"
+}
+
+stop() {
+  local preset=$1
+  docker rm -f "sglang-$preset" 2>/dev/null && echo "stopped: sglang-$preset" || echo "not running: sglang-$preset"
+}
+
+stop_all() {
+  local n=0
+  for c in $(docker ps -a --filter 'name=sglang-' --format '{{.Names}}'); do
+    docker rm -f "$c" >/dev/null && { echo "stopped: $c"; n=$((n+1)); }
+  done
+  echo "$n container(s) stopped"
+}
+
+logs() {
+  local preset=$1
+  exec docker logs -f --tail 200 "sglang-$preset"
+}
+
+case "${1:-list}" in
+  list|ls|"")              list ;;
+  stop)                    stop "${2:?need preset}" ;;
+  stop-all)                stop_all ;;
+  logs)                    logs "${2:?need preset}" ;;
+  *)                       start "$1" ;;
+esac

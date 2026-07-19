@@ -1,0 +1,126 @@
+# SGLang on Gaudi 3 — fork-based image, best-working configuration.
+#
+# Base = HabanaAI/sglang-fork (frozen at v1.22.0 / sglang 0.4.9, Sept 2025).
+# Upstream sgl-project/sglang doesn't work — too many CUDA hard-deps
+# (sgl_kernel, flashinfer, etc.) that can't be patched out.
+#
+# Best-effort result with this image: partial coherent decode (~7 tokens correct,
+# then degrades to repeating-token gibberish). The HPU decode kernel in
+# vllm_hpu_extension still has correctness issues even when sglang's call path
+# is routed through the proven-working vllm_gaudi.flat_pa.
+#
+# Build:
+#   cd ~
+#   # one-time, if not already present:
+#   git clone https://github.com/HabanaAI/sglang-fork.git
+#   docker build -t gaudi-sglang:1.22.0 \
+#       -f gaudi-setup/dockerfiles/Dockerfile.sglang \
+#       --build-arg http_proxy="$HTTP_PROXY" \
+#       --build-arg https_proxy="$HTTPS_PROXY" \
+#       --build-arg no_proxy="$NO_PROXY" \
+#       sglang-fork/
+FROM vault.habana.ai/gaudi-docker/1.24.0/ubuntu24.04/habanalabs/vllm-0.19.0-ptfork-2.10.0:1.24.0-1007
+
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+COPY . /opt/sglang-fork
+WORKDIR /opt/sglang-fork
+
+# 1. Drop torchao + triton pins from sglang's pyproject — torchao 0.9.0 pulls
+#    torch<2.6 (we need 2.10 HPU fork), triton is re-installed separately later.
+RUN sed -i 's|"torchao==0.9.0",||g; s|"triton==3.1.0",||g' python/pyproject.toml
+
+# 2. Stash Habana's torch family before pip install (sglang deps would otherwise
+#    downgrade torch to a CUDA wheel, breaking habana_frameworks autoload).
+RUN cd /usr/local/lib/python3.12/dist-packages \
+ && mkdir -p /opt/habana-torch-stash \
+ && cp -r torch torchgen torch_hpu              /opt/habana-torch-stash/ \
+ && cp -r torch-*.dist-info                     /opt/habana-torch-stash/ \
+ && cp -r torchvision torchvision.libs          /opt/habana-torch-stash/ \
+ && cp -r torchvision-*.dist-info               /opt/habana-torch-stash/ \
+ && cp -r torchaudio                            /opt/habana-torch-stash/ \
+ && cp -r torchaudio-*.dist-info                /opt/habana-torch-stash/
+
+# 3. Install sglang from the fork. Pip may downgrade torch — we restore below.
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -e "python[all_hpu]"
+
+# 4. Restore Habana torch (wipe what pip put down, drop stash back).
+RUN cd /usr/local/lib/python3.12/dist-packages \
+ && rm -rf nvidia* \
+ && rm -rf torch torch-*.dist-info torchgen torch_hpu \
+ && rm -rf torchvision torchvision.libs torchvision-*.dist-info \
+ && rm -rf torchaudio torchaudio-*.dist-info \
+ && rm -rf triton triton-*.dist-info pytorch_triton* \
+ && cp -r /opt/habana-torch-stash/. /usr/local/lib/python3.12/dist-packages/ \
+ && rm -rf /opt/habana-torch-stash \
+ && python3 -c "import torch; assert torch.__version__.startswith('2.10.0'), torch.__version__; print('torch:', torch.__version__)"
+
+# 5. Install triton==3.1.0 (sglang imports default_cache_dir, removed in 3.4+).
+RUN pip install --no-cache-dir --no-deps "triton==3.1.0" \
+ && python3 -c "from triton.runtime.cache import default_cache_dir; print('triton 3.1 OK')"
+
+# 6. Re-install Habana torch plugins per the Habana SGLang Quick Start docs.
+RUN pip install --no-cache-dir habana-torch-plugin habana-torch-dataloader \
+ && pip show habana-torch-plugin | grep -E '^(Name|Version)'
+
+# 7. Patch vllm_hpu_extension/environment.py — base vllm 0.19.0 doesn't expose
+#    VLLM_USE_V1 in vllm.envs (which uses lazy __getattr__ and raises on unknown
+#    attrs); use getattr fallback.
+RUN sed -i 's|envs\.VLLM_USE_V1|getattr(envs, "VLLM_USE_V1", False)|g' \
+        /usr/local/lib/python3.12/dist-packages/vllm_hpu_extension/environment.py
+
+# 8. Patch sglang's torchao_utils — short-circuit empty config BEFORE the
+#    lazy-import. Upstream's early-return is AFTER the import, which fails when
+#    torchao isn't installed (we removed the pin in step 1).
+RUN sed -i '/^    # Lazy import to suppress some warnings$/i\    if torchao_config == "" or torchao_config is None:\n        return model' \
+        python/sglang/srt/layers/torchao_utils.py
+
+# 9. Bump transformers 4.53 → 5.7 (so the model registry can recognize newer
+#    Qwen architectures if we ever try them; harmless for Llama).
+RUN pip install --no-cache-dir --no-deps --upgrade \
+        "transformers==5.7.0" \
+        "huggingface-hub>=1.5,<2.0" \
+        "tokenizers>=0.22.0,<=0.23.0"
+ENV VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1
+
+# 10. CRITICAL — route sglang's HPU attention through vllm_gaudi.extension.ops
+#     (proven-working, used by all our vLLM endpoints) instead of the buggy
+#     vllm_hpu_extension.ops. Same prompt_attention API; flat_pa needs 3 extra
+#     kwargs (sinks, k_scales, v_scales) which we set to None.
+RUN sed -i 's|import vllm_hpu_extension.ops as ops|import vllm_gaudi.extension.ops as ops|' \
+        python/sglang/srt/layers/attention/hpu_attn_backend.py \
+ && sed -i 's|values_fetch_func=fetch_value_cache,$|values_fetch_func=fetch_value_cache,\n            sinks=None,\n            k_scales=None,\n            v_scales=None,|' \
+        python/sglang/srt/layers/attention/hpu_attn_backend.py
+
+# 11. Leave vllm_gaudi's recompute_mode at its default (True). Patching it to
+#     False regresses output: with True we get ~7 coherent decode tokens before
+#     gibberish; with False we get only 1 correct token then immediate gibberish.
+#     The recompute_mode=True path is what works on the runtime side; the only
+#     side-effect is that HPU graph capture during warmup fails with synStatus
+#     26 (sdpa_recomp_fwd), so we disable warmup via SGLANG_HPU_SKIP_WARMUP=true
+#     in the launcher instead.
+
+# 12. Even though sglang's ops import is routed through vllm_gaudi (step 10),
+#     sglang STILL imports from vllm_hpu_extension for:
+#       - sglang/srt/layers/layernorm.py:132  (rms_norm)
+#       - sglang/srt/layers/attention/hpu_attn_backend.py:32  (Matmul/Softmax wrappers)
+#       - sglang/srt/hpu_utils.py:150  (find_bucket)
+#       - sglang/srt/model_executor/hpu_graph_runner.py  (profiler/environment)
+#     Apply the recompute_mode=False patch here too so any code path that ends up
+#     in vllm_hpu_extension.ops._fsdpa_prompt_attention doesn't trigger the
+#     broken sdpa_recomp_fwd TPC kernel. sed is no-op if pattern not found.
+RUN sed -i 's|recompute_mode = True|recompute_mode = False|g' \
+        /usr/local/lib/python3.12/dist-packages/vllm_hpu_extension/ops.py 2>/dev/null \
+ && (grep -n 'recompute_mode' /usr/local/lib/python3.12/dist-packages/vllm_hpu_extension/ops.py | head -3 || true)
+
+# Verify the stack imports cleanly end-to-end.
+RUN python3 -c "import sglang; print('sglang:', getattr(sglang, '__version__', 'unknown'))" \
+ && python3 -c "import sglang.launch_server" \
+ && python3 -c "import vllm_gaudi.extension.ops as ops; print('vllm_gaudi flat_pa OK:', callable(ops.flat_pa))"
+
+ENV PT_HPU_LAZY_MODE=0
+ENTRYPOINT []
+CMD ["python3", "-m", "sglang.launch_server", "--help"]
