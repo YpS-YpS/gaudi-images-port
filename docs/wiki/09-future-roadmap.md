@@ -94,7 +94,7 @@ Gaudi 4-7       2× Llama 4 Scout TP=2    (10M context, 2 endpoints)
 
 | Model | Architecture family | HPU support risk | Patch expectation |
 |---|---|---|---|
-| **GLM-5.1** | Z.AI ChatGLM | Medium-High | vllm-gaudi may need Gemma-4-style patches for new attention shapes. **Budget ~1 week.** |
+| **GLM-5.1 / 5.2** | Z.AI ChatGLM (DSA) | ~~Medium-High~~ **ANSWERED — feasible TODAY** | **GLM-5.2-FP8 (753B) is running on Box 1, all 8 cards, ~20 tok/s.** DSA sparse attention has no HPU indexer kernel, so it runs **force-dense MLA** (`GLM52_FORCE_DENSE`, 1 patch / 3 hunks). Exact ≤ 2048-token ctx; real long ctx still needs native DSA kernels. See [docs/GLM52.md](../GLM52.md). |
 | **DeepSeek V4-Pro** | DeepSeek MoE (extends V3) | Low | V3 already supported. V4 likely minor delta. **Few days.** |
 | **Kimi K2.6** | Moonshot custom 1T MoE | High | Newest, no known HPU port. Multi-node TP=16 adds complexity. **Plan as a research project.** |
 | **Llama 4 Maverick/Scout** | Llama 4 MoE | **Low** | Meta + Habana have training history; vLLM has the arch class; HPU port likely lands first. **Hours to days.** |
@@ -111,7 +111,7 @@ Gaudi 4-7       2× Llama 4 Scout TP=2    (10M context, 2 endpoints)
 
 ### Phase 2 — High-value medium-risk (1-2 days each)
 5. **DeepSeek V4-Pro on Box 3**. Lower risk than GLM-5.1. Validates the "big MoE on a single box" path.
-6. **GLM-5.1 on Box 2** — the crown jewel. Allocate 1 week. Patches may be needed. Document in a new `docs/GLM5.md` mirroring the GEMMA4.md format.
+6. ~~**GLM-5.1 on Box 2** — the crown jewel. Allocate 1 week. Patches may be needed. Document in a new `docs/GLM5.md`.~~ **DONE (2026-07-19), and it was 1 patch not 1 week:** GLM-5.2-FP8 (753B DSA) runs on Box 1 all 8 cards via force-dense MLA — [docs/GLM52.md](../GLM52.md). Remaining GLM-5.x work is *long context* (needs native DSA kernels), not bring-up.
 
 ### Phase 3 — Frontier experiments (1+ week each)
 7. **Multi-node vLLM Ray cluster** between Boxes 2+3 (test with DeepSeek V4-Pro at TP=16). Networking/setup is the hard part — model load is easier.
@@ -142,7 +142,8 @@ Gaudi 4-7       2× Llama 4 Scout TP=2    (10M context, 2 endpoints)
 
 ## Open questions to research before Phase 2
 
-- [ ] Does `vllm-gaudi 0.19` have an HPU class for GLM (ChatGLM5)? Check `/usr/local/lib/python3.12/dist-packages/vllm_gaudi/models/` for `glm*.py` or `chatglm*.py`.
+- [x] Does `vllm-gaudi 0.19` have an HPU class for GLM (ChatGLM5)? **Answered 2026-07-14 (via GLM-4.6V-FP8 bring-up):** NO — vllm-gaudi 0.19 ships no `glm*`/`glm4v_moe` HPU class. GLM runs the **generic upstream path** and needs just **one** Gemma-4-style patch: a 3D-shape fix in the `glm4v_moe` MoE block (`GLM46V_HPU_3D_OK`). FP8 checkpoint + ViT encoder worked with no HPU-specific work. This lowers the GLM-5.1 patch risk estimate above (was "budget ~1 week" — the ChatGLM family clearly rides the generic path with small deltas). See [docs/GLM46V.md](../GLM46V.md).
+- [x] Can the **GLM-5.x text flagship** (753B DSA MoE) run on one box? **Answered 2026-07-19 (via GLM-5.2-FP8 bring-up):** YES, at short/mid context, TODAY. GLM-5.2 rides vLLM's `deepseek_v2.py` (`GlmMoeDsaForCausalLM`). Its DeepSeek Sparse Attention indexer has **no HPU kernel** (`NotImplementedError`, CUDA/Ascend only) — but `index_topk=2048` means top-2048-of-N == all-of-N for N ≤ 2048, so dense MLA is **identical to trained sparse** at short context. The `GLM52_FORCE_DENSE` patch (drop the indexer, skip its weights) + `--hf-overrides qk_rope_head_dim=64` (attribute_map collision) got 753B running on all 8 cards, ~20 tok/s, first-attempt coherent. **Real 1M/long context still needs native DSA indexer kernels** HPU doesn't have — force-dense is quadratic and only exact ≤ 2048 tokens. See [docs/GLM52.md](../GLM52.md).
 - [ ] Same for Llama 4 (`llama4*.py`).
 - [ ] DeepSeek V4 architecture — is `deepseek_v3.py` (HPU) compatible, or are there V4-specific tensor shapes?
 - [ ] Kimi K2's architecture — is it upstream in vLLM yet? Check `/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/` for `kimi*.py`.

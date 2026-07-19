@@ -1,0 +1,53 @@
+# GLM-5.2-FP8 (zai-org/GLM-5.2-FP8, GlmMoeDsaForCausalLM, 753B MoE / ~40B active)
+# on Intel Gaudi 3 (HL-325), all 8 cards TP=8. Derived from the patched Gemma 4
+# image, which already carries transformers 5.7.0 (ships GlmMoeDsaConfig) + the
+# extended head-size table + the KV-divisibility unwrap + skip_special_tokens=False.
+#
+# GLM-5.2 is a DeepSeek-V3.2-style model: it rides vLLM's deepseek_v2.py class and
+# its attention is MLA + a DeepSeek Sparse Attention (DSA) indexer (top-index_topk,
+# 2048, key positions per query) + IndexShare. HPU has NO kernel for that indexer
+# (SparseAttnIndexer raises NotImplementedError on HPU) and vllm-gaudi ships no
+# DeepseekV32Indexer attention backend — so the model can't run sparse on HPU.
+#
+# ONE patch (3 hunks, marker GLM52_FORCE_DENSE) runs the MLA attention DENSE by
+# dropping the indexer. top-2048-of-N == all-of-N for N <= 2048 tokens, so dense
+# MLA is IDENTICAL to the trained sparse attention at short/mid context, and an
+# (empirically coherent) approximation beyond. Full story in docs/GLM52.md.
+#
+# The FP8 checkpoint loads natively (compressed-tensors, no INC). head_dim is a
+# uniform 192, so none of Gemma 4's hetero-head_dim KV machinery engages here.
+FROM gaudi-vllm-gemma4:0.19.0
+
+# Proxy args are accepted for parity with the Gemma 4 build even though this layer
+# installs no packages (transformers 5.7.0 is already in the base — it ships the
+# GlmMoeDsaConfig / GlmMoeDsaForCausalLM arch). The patch is a local source edit;
+# this build needs no network at all. Intel's network requires proxies when pip runs.
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+ENV VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1
+
+# Force-dense at the image level. SAFE as a baked ENV: the patch's runtime gate is
+# `hasattr(config, "index_topk") AND VLLM_GLM_DSA_FORCE_DENSE=1`. Ordinary
+# DeepSeek-V2/V3 checkpoints have no `index_topk`, so the flip is a no-op for them
+# and the loader's indexer-skip matches no tensors. The ONLY models affected are
+# DSA-sparse ones (GLM-5.x, DeepSeek-V3.2) — for which force-dense is the only way
+# to run on HPU at all. So this env harms nothing else on this image.
+ENV VLLM_GLM_DSA_FORCE_DENSE=1
+
+# Patch 1 — GLM52_FORCE_DENSE: 3 hunks in vLLM's deepseek_v2.py (import os,
+# is_v32->False before indexer construction, load_weights skips .self_attn.indexer.*).
+# The script is idempotent and self-asserting; the inline check below re-verifies all
+# four sub-markers so a rebuild fails loudly if the upstream source ever drifted.
+COPY patch_glm52_force_dense.py /tmp/patch_glm52_force_dense.py
+RUN python3 /tmp/patch_glm52_force_dense.py \
+ && python3 -c "import inspect, vllm.model_executor.models.deepseek_v2 as d; \
+                src = inspect.getsource(d); \
+                assert 'import os  # GLM52_FORCE_DENSE' in src, 'hunk 1 (import os) missing'; \
+                assert 'self.is_v32 = False  # GLM52_FORCE_DENSE' in src, 'hunk 2 (is_v32 flip) missing'; \
+                assert '_glm52_force_dense = (' in src, 'hunk 3a (load gate) missing'; \
+                assert 'continue  # GLM52_FORCE_DENSE' in src, 'hunk 3b (indexer skip) missing'; \
+                print('OK patch 1 - GLM52_FORCE_DENSE: all 3 hunks present (dense MLA, indexer dropped)')"
+
+WORKDIR /root/scripts

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# glm52-launch — launch GLM-5.2-FP8 (zai-org, 753B MoE / ~40B active,
+# GlmMoeDsaForCausalLM) on all 8 Intel Gaudi 3 cards (HL-325) via vLLM, using the
+# force-dense MLA image gaudi-vllm-glm52:0.19.0.
+#
+# Dedicated launcher (like sglang-launch), NOT a bin/vllm-launch preset: GLM-5.2
+# needs `--hf-overrides '{"qk_rope_head_dim": 64}'` (JSON) + `--enable-expert-parallel`
+# + `--block-size 128` + several extra env vars, none of which the vllm-launch
+# preset template (pipe-delimited rows, `-lc "exec vllm serve ..."`) can express
+# without fragile nested single-quote/JSON escaping. So it lives here, standalone.
+#
+# Why force-dense: HPU has no DeepSeek Sparse Attention (DSA) indexer kernel, so the
+# model can't run sparse. The gaudi-vllm-glm52:0.19.0 image bakes the GLM52_FORCE_DENSE
+# patch (drops the indexer, runs dense MLA — exact for <=2048-token context) and
+# ENV VLLM_GLM_DSA_FORCE_DENSE=1. Full story: docs/GLM52.md.
+#
+# Usage:
+#   glm52-launch            # start (or restart) GLM-5.2 on port 8010, all 8 cards
+#   glm52-launch stop       # stop + remove the container
+#   glm52-launch logs       # follow logs
+#   glm52-launch smoke      # run the 3 smoke checks (models + text + code)
+set -euo pipefail
+
+IMAGE="gaudi-vllm-glm52:0.19.0"
+NAME="vllm-glm52"
+MODEL="zai-org/GLM-5.2-FP8"
+PORT=8010
+SERVED="glm-5.2"
+HF_CACHE=/home/satyajit-gaudi/hf-cache
+
+G='\033[0;32m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
+
+start() {
+  echo -e "${B}image:${N}   $IMAGE"
+  echo -e "${B}model:${N}   $MODEL   ${B}TP:${N} 8 (cards 0-7)   ${B}port:${N} $PORT"
+
+  docker rm -f "$NAME" 2>/dev/null || true
+
+  # PT_HPU_WEIGHT_SHARING=0 + PT_HPU_ENABLE_LAZY_COLLECTIVES=true: required for TP=8.
+  # VLLM_HPU_FORCE_CHANNEL_FP8=true: channel-wise FP8 for the compressed-tensors ckpt.
+  # VLLM_GLM_DSA_FORCE_DENSE=1 + VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1 are ALSO baked
+  # into the image (ENV in Dockerfile.glm52); re-passed here to keep the launcher
+  # self-documenting and correct even if pointed at a differently-built image.
+  # --hf-overrides qk_rope_head_dim=64: transformers 5.7.0 GlmMoeDsaConfig aliases
+  # head_dim(192) onto qk_rope_head_dim via attribute_map, clobbering the real 64 and
+  # producing a q_b_proj/kv_a_proj shape mismatch at load. Override restores 256/576.
+  docker run -d --name "$NAME" --runtime=habana --net=host --ipc=host --cap-add=sys_nice \
+    -e HABANA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+    -e PT_HPU_LAZY_MODE=1 \
+    -e PT_HPU_ENABLE_LAZY_COLLECTIVES=true \
+    -e PT_HPU_WEIGHT_SHARING=0 \
+    -e VLLM_SKIP_WARMUP=true \
+    -e VLLM_HPU_FORCE_CHANNEL_FP8=true \
+    -e VLLM_GLM_DSA_FORCE_DENSE=1 \
+    -e VLLM_ENGINE_ITERATION_TIMEOUT_S=1200 \
+    -e VLLM_RPC_TIMEOUT=1200000 \
+    -e OMPI_MCA_btl_vader_single_copy_mechanism=none \
+    -e VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1 \
+    -e HF_HOME=/root/.cache/huggingface -e HF_HUB_OFFLINE=1 \
+    -v "$HF_CACHE:/root/.cache/huggingface" \
+    --entrypoint vllm \
+    "$IMAGE" \
+    serve "$MODEL" \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --block-size 128 \
+      --max-model-len 8192 \
+      --max-num-seqs 4 \
+      --gpu-memory-utilization 0.85 \
+      --trust-remote-code \
+      --hf-overrides '{"qk_rope_head_dim": 64}' \
+      --served-model-name "$SERVED" \
+      --port "$PORT" \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm45 \
+      --enable-auto-tool-choice
+
+  echo -e "${G}started:${N}  $NAME"
+  echo -e "${B}API:${N}      http://localhost:$PORT/v1   (served-model-name: $SERVED)"
+  echo -e "${B}logs:${N}     $0 logs"
+  echo -e "${B}smoke:${N}    $0 smoke   (wait for 'Application startup complete' first)"
+  echo -e "${B}note:${N}     thinking model — keep max_tokens >= 512; short prompts (<2048 tok) are exact-dense"
+}
+
+stop() {
+  docker rm -f "$NAME" 2>/dev/null && echo "stopped: $NAME" || echo "not running: $NAME"
+}
+
+logs() { exec docker logs -f --tail 200 "$NAME"; }
+
+smoke() {
+  # Box has http_proxy in /etc/environment on some hosts → --noproxy for localhost.
+  echo -e "${B}(a) /v1/models${N}"
+  curl --noproxy '*' -s "http://localhost:$PORT/v1/models" | python3 -m json.tool
+  echo -e "\n${B}(b) text coherence${N}"
+  curl --noproxy '*' -s "http://localhost:$PORT/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d '{
+      "model":"'"$SERVED"'",
+      "messages":[{"role":"user","content":"What is the capital of France? One sentence."}],
+      "max_tokens":512}' | python3 -m json.tool
+  echo -e "\n${B}(c) coding${N}"
+  curl --noproxy '*' -s "http://localhost:$PORT/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d '{
+      "model":"'"$SERVED"'",
+      "messages":[{"role":"user","content":"Write a Python function to check if a string is a palindrome."}],
+      "max_tokens":1024}' | python3 -m json.tool
+}
+
+case "${1:-start}" in
+  start|"") start ;;
+  stop)     stop ;;
+  logs)     logs ;;
+  smoke)    smoke ;;
+  *)        echo "usage: $0 {start|stop|logs|smoke}"; exit 1 ;;
+esac
