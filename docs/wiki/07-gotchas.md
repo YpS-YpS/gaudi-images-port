@@ -154,6 +154,46 @@ record. Saved as a memory: `feedback_minimax_m2_preferred.md`.
 
 **Default to MiniMax M2 unless the user asks for M2.7 specifically.**
 
+## Dockerfile.gemma4 unpinned deps pull CUDA torch (version drift)
+
+The Gemma 4 image's second `pip install` upgrades `accelerate>=1.10.0`,
+`compressed-tensors>=0.12.0`, etc. with no version ceiling. The image built
+fine in May 2026, but by **June 2026** those `>=` ranges resolved to newer
+releases (`accelerate 1.14.0`) whose dependency tree pulled **upstream CUDA
+`torch 2.12.1+cu130`**, replacing the Habana HPU torch fork. The build then
+dies at the first patch:
+
+```
+AssertionError: Current PyTorch version 2.12.1+cu130 is detected as
+neither HPU fork nor CPU upstream.
+... RuntimeError: Failed to load the backend extension: device_backend
+```
+
+(the `import vllm_gaudi` in patch 1's verification triggers `habana_frameworks.torch`).
+
+**Fix (committed):** `dockerfiles/torch-constraints.txt` pins the HPU torch +
+CPU torchvision/torchaudio, and `Dockerfile.gemma4` passes
+`-c /tmp/torch-constraints.txt` to the deps-resolving install. pip then keeps
+the HPU torch and back-tracks to a torch-2.10-compatible `accelerate`.
+After a base-image bump, refresh the pins:
+`docker run --rm --entrypoint pip <base> show torch torchvision torchaudio`.
+
+## Host `/etc/environment` proxy breaks localhost curl AND smoke.sh
+
+Separate from the in-container `NO_PROXY` note above: on some boxes the
+**host** has `http_proxy`/`https_proxy` exported globally in
+`/etc/environment`. Every host-side `curl http://localhost:8004/...` (incl.
+`scripts/smoke.sh`, which doesn't pass `--noproxy`) then routes through the
+Intel proxy and fails — the server is fine, the probe is lying.
+
+Tells: `docker logs` shows `Application startup complete`, the container is
+`running`, but `curl localhost:<port>/v1/models` returns nothing. Confirm with
+`env | grep -i proxy`.
+
+**Fix:** run host probes with the proxy cleared, e.g.
+`curl --noproxy '*' http://localhost:8004/v1/models`, or for smoke:
+`env http_proxy= https_proxy= no_proxy='*' bash scripts/smoke.sh http://localhost:8004 gemma4-31b 4000`.
+
 ## TP must divide num_kv_heads
 
 The most common "but the math says 4 cards is fine" failure. For MiniMax M2:

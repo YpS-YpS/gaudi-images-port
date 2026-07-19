@@ -1,0 +1,10 @@
+# Pin the Habana HPU torch fork (and its CPU torchvision/torchaudio) so that
+# `pip install --upgrade accelerate/compressed-tensors/...` in Dockerfile.gemma4
+# cannot pull in upstream CUDA torch and clobber habana_frameworks.torch.
+#
+# Versions below are from the vllm-0.19.0-ptfork-2.10.0:1.24.0-1007 base image.
+# Verify after a base-image bump with:
+#   docker run --rm --entrypoint pip <base> show torch torchvision torchaudio
+torch==2.10.0a0+gitc1e5ed4
+torchvision==0.25.0+cpu
+torchaudio==2.10.0+cpu

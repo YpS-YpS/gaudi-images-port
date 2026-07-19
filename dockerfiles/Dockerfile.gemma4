@@ -4,8 +4,14 @@ FROM vault.habana.ai/gaudi-docker/1.24.0/ubuntu24.04/habanalabs/vllm-0.19.0-ptfo
 
 # Force-upgrade the bits Gemma 4 needs.
 # --no-deps on transformers prevents pip from re-resolving the entire ML stack.
+# -c torch-constraints.txt pins the HPU torch fork so the second (deps-resolving)
+# install can't drag in upstream CUDA torch. Without this, by mid-2026 the
+# unpinned `accelerate>=1.10.0` resolved to 1.14.0, which pulled torch 2.12.1+cu130
+# and broke habana_frameworks.torch ("neither HPU fork nor CPU upstream") — the
+# whole image then fails at the first patch's `import vllm_gaudi`. See 07-gotchas.md.
+COPY torch-constraints.txt /tmp/torch-constraints.txt
 RUN pip install --no-cache-dir --no-deps --upgrade transformers==5.7.0 \
- && pip install --no-cache-dir --upgrade \
+ && pip install --no-cache-dir -c /tmp/torch-constraints.txt --upgrade \
         "tokenizers>=0.22.0" \
         "compressed-tensors>=0.12.0" \
         "accelerate>=1.10.0" \

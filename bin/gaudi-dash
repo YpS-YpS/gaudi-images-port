@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # gaudi-dash — fancy multi-pane dashboard for this Gaudi3 box.
-# Layout (top = the showpiece, btop-style live AIP monitor):
+# Layout (full-width stacked so btop always gets >=80 cols; it refuses <80x24):
 #   ┌─────────────────────────────────────────────┐
 #   │             hl-top  (8× HL-325)             │
-#   ├──────────────────────┬──────────────────────┤
-#   │        btop          │        htop          │
-#   └──────────────────────┴──────────────────────┘
+#   ├─────────────────────────────────────────────┤
+#   │                   btop                       │
+#   ├─────────────────────────────────────────────┤
+#   │                   htop                       │
+#   └─────────────────────────────────────────────┘
 # Usage:
 #   gaudi-dash         # create or attach to the dashboard
 #   gaudi-dash kill    # tear it down
@@ -33,14 +35,23 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exec tmux attach -t "$SESSION"
 fi
 
-# Pane 0 (top, full width): hl-top — the fancy AIP monitor.
+# Full-width STACKED panes (top→bottom: hl-top, btop, htop).
+# Why not side-by-side: btop hard-requires an 80x24 terminal and refuses to
+# render ("Terminal size too small") below that. A side-by-side split halves the
+# width, so on anything under ~162 cols each bottom pane is <80 wide and btop
+# blanks. Stacking gives btop the FULL terminal width (>=80 on any real term),
+# and we hand it >=24 rows explicitly. hl-top absorbs whatever height is left
+# (it degrades gracefully; btop does not).
 tmux new-session -d -s "$SESSION" -x 220 -y 60 "$HL_TOP"
 
-# Pane 1 (bottom-left): btop. Split off the bottom 45% of pane 0.
-tmux split-window -v -l 45% -t "$SESSION:0.0" 'btop'
+# Middle: btop, full width, ~62% of height. PERCENTAGE (not absolute rows) so the
+# share survives tmux's proportional resize when a smaller client attaches — an
+# absolute `-l 26` gets scaled down below btop's 24-row floor and it blanks.
+# btop needs >=24 rows, so a terminal >=~40 rows tall is required for it to render.
+tmux split-window -v -l 78% -t "$SESSION:0.0" 'btop'
 
-# Pane 2 (bottom-right): htop. Split the bottom pane horizontally.
-tmux split-window -h -l 50% -t "$SESSION:0.1" 'htop'
+# Bottom: htop, full width, small slice under btop.
+tmux split-window -v -l 20% -t "$SESSION:0.1" 'htop'
 
 # Subtle styling for the tmux status bar so the chrome matches the panels.
 # These are global options so they take no target; failures are non-fatal.

@@ -26,7 +26,9 @@ declare -A PRESETS=(
   [235b-tp8]="Qwen/Qwen3-VL-235B-A22B-Thinking-FP8|8|0,1,2,3,4,5,6,7|8006|32768"
   # Gemma 4 31B Instruct FP8 — uses derived image (vllm 0.19 + transformers 5.7).
   # Build with:  cd dockerfiles && docker build -t gaudi-vllm-gemma4:0.19.0 -f Dockerfile.gemma4 .
-  [gemma4-31b]="RedHatAI/gemma-4-31b-it-FP8-Dynamic|1|2|8004|16384|gaudi-vllm-gemma4:0.19.0"
+  [gemma4-31b]="RedHatAI/gemma-4-31b-it-FP8-Dynamic|1|2|8004|65536|gaudi-vllm-gemma4:0.19.0"
+  # Same model/image with reasoning OFF (enable_thinking=false, no reasoning parser) — direct answers, tool calls still work.
+  [gemma4-31b-noreason]="RedHatAI/gemma-4-31b-it-FP8-Dynamic|1|0|8005|65536|gaudi-vllm-gemma4:0.19.0"
   # gpt-oss-120b BF16 unquantized (MoE, 120B total, 5B active, alternating sliding+full attn).
   # ~240 GB on disk; TP=4 on Gaudis 3-6 (60 GB weights/card, leaves ~48 GB for KV+graphs).
   # Reuses the Gemma 4 patched image — the UniformTypeKVCacheSpecs unwrap path
@@ -35,12 +37,43 @@ declare -A PRESETS=(
   # MiniMax M2 (FP8, 230B MoE, ~10B active) — vllm-gaudi ships handcrafted
   # HpuMiniMaxM2ForCausalLM class. TP=4 on Gaudis 4-7, port 8006.
   # ~215 GB on disk; ~107 GB/card steady-state HBM.
-  [minimax-m2]="MiniMaxAI/MiniMax-M2|4|4,5,6,7|8006|16384|gaudi-vllm-gemma4:0.19.0"
+  [minimax-m2]="MiniMaxAI/MiniMax-M2|4|4,5,6,7|8006|196608|gaudi-vllm-gemma4:0.19.0"
   # MiniMax M2.7 (FP8, 229B MoE, ~10B active) — Apr 2026 successor to M2.
   # Same MiniMaxM2ForCausalLM arch (HPU override applies), but 256 experts (vs 128),
   # top-8 routing (vs top-4), and 3 MTP (multi-token prediction) modules.
   # ~230 GB on disk; expect ~115 GB/card. Same Gaudis 4-7 + port 8006 (swap with M2).
   [minimax-m2.7]="MiniMaxAI/MiniMax-M2.7|4|4,5,6,7|8006|16384|gaudi-vllm-gemma4:0.19.0"
+  # Qwen3.6-27B (BF16, Apr 2026) — Alibaba's first dense flagship in the 3.6 line.
+  # 27B params (~55.6 GB on disk), beats Qwen3.5-397B-A17B on SWE-bench/coding.
+  # Native multimodal, 262K ctx native (1M extensible). Unified thinking/non-thinking
+  # via Qwen3 reasoning parser. Single-card TP=1 on Gaudi 1 (AIP 1).
+  # Uses gemma4-patched 0.19 image for newer transformers (Apr 2026 arch).
+  # ⚠ UNSTABLE for agentic/large-prompt use on vllm-gaudi 0.19. Across single-card,
+  # TP=2 and TP=4, large-prompt prefill + tool-call workloads crash in 3 distinct
+  # ways (PT_DEVMEM OOM; PT_LAZY "tensor_data is empty" embed_tokens at TP=4; engine
+  # death on a tool call after a big prompt). max-num-batched-tokens=512 got one 10K
+  # prompt through but the engine still died on the next request. Immature GDN/
+  # qwen3-next kernel support on the Habana fork. For agentic coding (Crush) use
+  # MiniMax M2 instead (port 8006). This preset is parked on AIP 0,1 for light/short
+  # experimentation only — do NOT point Crush at it. See [[project-qwen36-toolparser]].
+  [qwen3.6-27b]="Qwen/Qwen3.6-27B|2|0,1|8007|32768|gaudi-vllm-gemma4:0.19.0"
+  # GLM-4.6V-FP8 (zai-org, Glm4vMoeForConditionalGeneration / glm4v_moe, ~108B MoE:
+  # 128 routed + 1 shared experts, 8/token, ~12B active; 46 layers; uniform head_dim 128;
+  # FP8 compressed-tensors; 128K native ctx). Derived image FROM gaudi-vllm-gemma4:0.19.0
+  # adds exactly ONE patch (GLM46V_HPU_3D_OK): the HPU model runner feeds a 3D
+  # [batch,seq,hidden] tensor but upstream Glm4MoeSparseMoeBlock.forward assumed 2D →
+  # ValueError on first inference (weights load fine, crash only at forward). The FP8
+  # checkpoint loads natively (no INC), the ViT vision encoder rides the generic
+  # TORCH_SDPA path, and head_dim is uniform, so none of Gemma 4's five patches apply.
+  # TP=2 on Gaudis 1,2, port 8006. ~50-52 tok/s single-stream; ~105 GB/card, 46.6 GB KV.
+  # Build:  cd dockerfiles && docker build -t gaudi-vllm-glm46v:0.19.0 -f Dockerfile.glm46v .
+  # NOTE vs the verified ad-hoc `docker run`: that used `--entrypoint vllm` +
+  # `HF_HUB_OFFLINE=1`. This launcher reaches the same `vllm serve` by overriding the
+  # entrypoint with `/bin/bash -lc "exec vllm serve"` (bypasses the image's env-driven
+  # autocalc entrypoint — same effect as `--entrypoint vllm`), and fetches weights ONLINE
+  # via the corp proxy rather than offline. VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1 is baked
+  # into the image (ENV in Dockerfile.glm46v), so it need not be re-passed here.
+  [glm46v]="zai-org/GLM-4.6V-FP8|2|1,2|8006|32768|gaudi-vllm-glm46v:0.19.0"
 )
 
 # colors
@@ -86,11 +119,17 @@ start() {
   local TOOL_PARSER="hermes"
   local SERVED_NAME="qwen3-vl-$preset"
   local EXTRA_VLLM_FLAGS=""
-  if [[ "$preset" == "gemma4-31b" ]]; then
+  if [[ "$preset" == gemma4-31b* ]]; then
     TOOL_PARSER="gemma4"
-    REASONING_FLAGS="--reasoning-parser gemma4"
-    SERVED_NAME="gemma4-31b"
-    EXTRA_VLLM_FLAGS="--default-chat-template-kwargs '{\"enable_thinking\":true}'"
+    SERVED_NAME="$preset"
+    if [[ "$preset" == *noreason* ]]; then
+      # reasoning OFF: don't open the thinking channel, skip the reasoning parser → direct answers.
+      REASONING_FLAGS=""
+      EXTRA_VLLM_FLAGS="--default-chat-template-kwargs '{\"enable_thinking\":false}'"
+    else
+      REASONING_FLAGS="--reasoning-parser gemma4"
+      EXTRA_VLLM_FLAGS="--default-chat-template-kwargs '{\"enable_thinking\":true}'"
+    fi
   fi
   # gpt-oss-120b — Harmony response format. Tools are parsed via Harmony (channel
   # markers + Responses API), not a tool_parser plugin. So we skip --tool-call-parser.
@@ -107,6 +146,28 @@ start() {
     TOOL_PARSER="minimax_m2"
     REASONING_FLAGS="--reasoning-parser minimax_m2"
     SERVED_NAME="$preset"
+  fi
+  # Qwen3.6 family — Qwen3 reasoning parser handles the thinking-preservation
+  # tokens. Served name should not be auto-prefixed with qwen3-vl- (this is the
+  # text/dense line, not the VL/multimodal preset family in this script).
+  if [[ "$preset" == qwen3.6-* ]]; then
+    REASONING_FLAGS="--reasoning-parser qwen3"
+    SERVED_NAME="$preset"
+    # Qwen3.6 emits XML-style tool calls (<tool_call><function=name>...), NOT the
+    # hermes JSON format. Without qwen3_xml the calls leak into content as raw text
+    # and agentic clients (Crush, etc.) see zero tool_calls. vLLM #qwen3xml parser.
+    TOOL_PARSER="qwen3_xml"
+  fi
+  # GLM-4.6V — vllm-gaudi ships no glm4v_moe HPU class, so it runs the generic upstream
+  # path. Uses the glm45 tool + reasoning parsers (both registered in vLLM 0.19). The ViT
+  # vision encoder needs --mm-encoder-tp-mode data (generic TORCH_SDPA path, no HPU mm work).
+  # NB: GLM-4.6V emits literal <|begin_of_box|>...<|end_of_box|> delimiters as TEXT (not
+  # special tokens); the glm45 reasoning parser doesn't strip them — cosmetic.
+  if [[ "$preset" == glm46v* ]]; then
+    TOOL_PARSER="glm45"
+    REASONING_FLAGS="--reasoning-parser glm45"
+    SERVED_NAME="glm-4.6v"
+    EXTRA_VLLM_FLAGS="$EXTRA_VLLM_FLAGS --mm-encoder-tp-mode data"
   fi
 
   # 235B-A22B-FP8 has chronic HBM fragmentation under sustained inference.
@@ -128,6 +189,43 @@ start() {
     GPU_UTIL=0.85
     MAX_NUM_SEQS=16
     EXTRA_ENV="$EXTRA_ENV -e HABANA_PGM_LRU_MAX=60000"
+  fi
+  # 64K context presets — halve max-num-seqs vs default to keep KV cache budget flat
+  # (KV scales with max-num-seqs × max-model-len). Lets long-context chats fit
+  # without pushing HBM into OOM territory.
+  if [[ "$preset" == "minimax-m2" || "$preset" == "qwen3.6-27b" || "$preset" == gemma4-31b* ]]; then
+    MAX_NUM_SEQS=16
+  fi
+  # GLM-4.6V verified at max-num-seqs 8 (32K ctx, ~46.6 GB KV reserved, ~105 GB/card).
+  if [[ "$preset" == glm46v* ]]; then
+    MAX_NUM_SEQS=8
+  fi
+  # Qwen3.6 is a GDN / qwen3-next hybrid with heavy dynamic-shape recompilation,
+  # which fragments HBM. At 64K context with util 0.9 the defragmenter ran out of
+  # contiguous memory mid-request and the engine died:
+  #   "PT_DEVMEM OOM: No enough memory for defragment"
+  # Same class of failure as 235B / M2.7 — apply the same mitigation: lower util
+  # for defrag headroom + larger recipe-cache LRU to cut eviction churn.
+  if [[ "$preset" == "qwen3.6-27b" ]]; then
+    # Large-prompt prefill of this GDN hybrid is unstable on vllm-gaudi 0.19: the
+    # 2048-token prefill chunk triggers either PT_DEVMEM OOM (tight cards) or a
+    # PT_LAZY "tensor_data is empty" embed_tokens shape bug (TP=4). Cap the chunk
+    # at 512 so prefill uses a smaller, better-supported bucket + far less activation.
+    GPU_UTIL=0.8
+    EXTRA_ENV="$EXTRA_ENV -e HABANA_PGM_LRU_MAX=60000"
+    EXTRA_VLLM_FLAGS="$EXTRA_VLLM_FLAGS --max-num-batched-tokens 512"
+  fi
+  # MiniMax M2 tuned for LONG CODING SESSIONS (Crush): 192K context (M2's native
+  # max_position_embeddings — NOT 1M; that's M1. No RoPE scaling, so 196608 is the
+  # real ceiling). Low concurrency (max-num-seqs 2) since sessions are deep, not wide.
+  # Prefix caching ON so each turn's growing context reuses the cached prefix instead
+  # of re-prefilling (huge speedup + avoids re-OOM). Chunked prefill (512) keeps the
+  # first big prefill OOM-safe; util 0.8 + recipe LRU give defrag headroom.
+  if [[ "$preset" == "minimax-m2" ]]; then
+    GPU_UTIL=0.8
+    MAX_NUM_SEQS=2
+    EXTRA_ENV="$EXTRA_ENV -e HABANA_PGM_LRU_MAX=60000"
+    EXTRA_VLLM_FLAGS="$EXTRA_VLLM_FLAGS --max-num-batched-tokens 512 --enable-prefix-caching"
   fi
 
   echo -e "${B}preset:${N}   $preset"

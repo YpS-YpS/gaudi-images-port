@@ -87,6 +87,7 @@ That prints the card matrix + running endpoints in one screen.
 | Avoid a known trap | [07-gotchas.md](07-gotchas.md) |
 | Know what's been tried before (and didn't work) | [08-history.md](08-history.md) |
 | Plan for new boxes / pick next models to deploy | [09-future-roadmap.md](09-future-roadmap.md) — open-weight agentic leaderboard + 5-box fleet plan |
+| **Bring up a NEW Gaudi box (full runbook)** | **[10-new-box-runbook.md](10-new-box-runbook.md) — probe → driver/kernel → docker → images → weights → launch, + every gotcha** |
 
 ## User preferences (saved in `~/.claude/memory/`)
 

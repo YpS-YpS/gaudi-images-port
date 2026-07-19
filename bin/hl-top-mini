@@ -468,6 +468,14 @@ def get_primary_ip() -> str:
         s.close()
 
 
+# Endpoint probes always target 127.0.0.1, so a corporate http_proxy must never
+# apply. urllib otherwise honors $http_proxy/$https_proxy even for localhost,
+# routing the probe through the proxy → every endpoint reads as "not detected"
+# and the Models tile shows no IP/port. A proxy-free opener fixes this on any
+# box regardless of whether $no_proxy is set.
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _probe_model_port(port: int, timeout: float = MODEL_PROBE_TIMEOUT) -> list[str]:
     """If port has an OpenAI-compatible server, return its list of model IDs;
     otherwise return []."""
@@ -478,7 +486,7 @@ def _probe_model_port(port: int, timeout: float = MODEL_PROBE_TIMEOUT) -> list[s
         return []
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/models")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _LOCAL_OPENER.open(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
         return [m.get("id", "?") for m in data.get("data", []) if m.get("id")]
     except (urllib.error.URLError, json.JSONDecodeError, OSError, ValueError):
@@ -791,20 +799,41 @@ def render_header(aips: list[AIP], inner: int) -> list[str]:
     return [pad_to(left_block + " " * gap + ts_seg, inner)]
 
 
-def render_models_line(models: list[tuple[str, int]], host_ip: str, inner: int) -> str:
-    """One-line summary of detected OpenAI-compatible model servers."""
+def render_models_line(models: list[tuple[str, int]], host_ip: str, inner: int) -> list[str]:
+    """Summary of detected OpenAI-compatible model servers, as one OR MORE lines.
+
+    Each endpoint's name + IP:port is kept intact: tokens are packed greedily
+    and WRAPPED onto continuation lines rather than truncated to a single row,
+    so the host and port stay visible no matter how many models are running or
+    how narrow the terminal is."""
     label = f" {C_TITLE}Models{RESET}  "
     if not models:
         body = f"{C_DIM}─ no /v1/models endpoints detected on common ports ─{RESET}"
-        return pad_to(label + body, inner)
+        return [pad_to(label + body, inner)]
     sep = f"  {C_DIM}·{RESET}  "
-    parts = []
-    for mid, port in models:
-        parts.append(
-            f"{C_ACCENT}⬢{RESET} {BOLD}{mid}{RESET} "
-            f"{C_DIM}@{RESET} {C_VALUE}{host_ip}{C_DIM}:{RESET}{C_VALUE}{port}{RESET}"
-        )
-    return pad_to(label + sep.join(parts), inner)
+    sep_w = vis(sep)
+    indent = " " * vis(label)
+    tokens = [
+        f"{C_ACCENT}⬢{RESET} {BOLD}{mid}{RESET} "
+        f"{C_DIM}@{RESET} {C_VALUE}{host_ip}{C_DIM}:{RESET}{C_VALUE}{port}{RESET}"
+        for mid, port in models
+    ]
+    lines: list[str] = []
+    cur = label
+    cur_w = vis(label)
+    first_on_line = True
+    for tok in tokens:
+        tok_w = vis(tok)
+        if not first_on_line and cur_w + sep_w + tok_w > inner:
+            lines.append(pad_to(cur, inner))
+            cur = indent + tok
+            cur_w = vis(indent) + tok_w
+        else:
+            cur = cur + (tok if first_on_line else sep + tok)
+            cur_w += tok_w if first_on_line else sep_w + tok_w
+        first_on_line = False
+    lines.append(pad_to(cur, inner))
+    return lines
 
 
 def render_long_ewma_line(long_state: dict, daily_state: dict, inner: int) -> str:
@@ -902,9 +931,11 @@ def render(
     if aips and len(power_raw) >= 1:
         # Section separator
         buf.append(C_FRAME + TEE_L + H * inner + TEE_R + RESET + CSI + "K\n")
-        # Models row (detected OpenAI-compatible endpoints, scanned in main loop)
-        models_line = render_models_line(models, host_ip, inner)
-        buf.append(C_FRAME + V + RESET + models_line + C_FRAME + V + RESET + CSI + "K\n")
+        # Models row(s) — detected OpenAI-compatible endpoints, scanned in main
+        # loop. Wraps to multiple lines so each model's IP:port stays visible.
+        model_lines = render_models_line(models, host_ip, inner)
+        for ml in model_lines:
+            buf.append(C_FRAME + V + RESET + ml + C_FRAME + V + RESET + CSI + "K\n")
         # Title row
         last_raw = power_raw[-1]
         last_ewma = power_ewma[-1]
@@ -924,10 +955,11 @@ def render(
         long_line = render_long_ewma_line(long_state, daily_state, inner)
         buf.append(C_FRAME + V + RESET + long_line + C_FRAME + V + RESET + CSI + "K\n")
         # Graph body
-        gh = min(POWER_GRAPH_ROWS, max(2, rows - (1 + 1 + 1 + len(aips) + 1 + 1 + 1 + 1 + 1 + 1)))
+        extra_model_rows = len(model_lines) - 1  # wrapped Models lines beyond the first
+        gh = min(POWER_GRAPH_ROWS, max(2, rows - (1 + 1 + 1 + len(aips) + 1 + 1 + 1 + 1 + 1 + 1) - extra_model_rows))
         for line in render_power_graph(power_raw, power_ewma, total_max, inner, gh):
             buf.append(C_FRAME + V + RESET + line + C_FRAME + V + RESET + CSI + "K\n")
-        graph_rows_used = 1 + 1 + 1 + 1 + gh  # sep + models + title + long-ewma + graph
+        graph_rows_used = 1 + len(model_lines) + 1 + 1 + gh  # sep + models + title + long-ewma + graph
 
     # Bottom border
     bottom = C_FRAME + BL + H * inner + BR + RESET
