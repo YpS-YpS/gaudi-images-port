@@ -1,0 +1,39 @@
+# GLM-4.6V-FP8 (zai-org/GLM-4.6V-FP8, Glm4vMoeForConditionalGeneration, ~108B MoE)
+# on Intel Gaudi 3 (HL-325). Derived from the patched Gemma 4 image, which already
+# carries transformers 5.7.0 (ships glm4v_moe), the extended head sizes, the KV
+# divisibility unwrap, and skip_special_tokens=False.
+#
+# GLM-4.6V has UNIFORM head_dim 128, so the Gemma-4 head-size / KV-divisibility
+# patches are not needed here. It routes through the generic upstream path
+# (vllm/model_executor/models/glm4_1v.py + glm4_moe.py) because vllm_gaudi ships
+# no glm4v_moe HPU class.
+#
+# ONE patch is required:
+#   Patch 1 (GLM46V_HPU_3D_OK) — Glm4MoeSparseMoeBlock.forward assumed a 2D
+#   [num_tokens, hidden] tensor: `num_tokens, hidden_dim = hidden_states.shape`
+#   and returned `.view(num_tokens, hidden_dim)`. On HPU the model runner feeds a
+#   3D [batch, seq, hidden] tensor, so the unpack raised
+#   `ValueError: too many values to unpack (expected 2)` on the first forward.
+#   Fix: capture orig_shape, flatten by last dim, restore orig_shape on return.
+#   Works for both 2D and 3D inputs.
+FROM gaudi-vllm-gemma4:0.19.0
+
+# Proxy args are accepted for parity with the Gemma 4 build even though this
+# layer installs no packages (Intel network requires them when pip is used).
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+
+ENV VLLM_SKIP_TRANSFORMERS_VERSION_CHECK=1
+
+# Patch 1 — GLM46V_HPU_3D_OK: make the GLM MoE block shape-agnostic.
+RUN sed -i \
+      -e 's|        num_tokens, hidden_dim = hidden_states.shape|        orig_shape = hidden_states.shape  # GLM46V_HPU_3D_OK\n        hidden_dim = orig_shape[-1]|' \
+      -e 's|        return final_hidden_states.view(num_tokens, hidden_dim)|        return final_hidden_states.view(orig_shape)|' \
+      /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/glm4_moe.py \
+ && python3 -c "import inspect, vllm.model_executor.models.glm4_moe as g; \
+                src = inspect.getsource(g); \
+                assert 'GLM46V_HPU_3D_OK' in src, 'patch 1 marker missing'; \
+                assert 'final_hidden_states.view(orig_shape)' in src, 'patch 1 return not rewritten'; \
+                assert 'num_tokens, hidden_dim = hidden_states.shape' not in src, 'old 2D unpack still present'; \
+                print('OK patch 1 - GLM MoE forward is shape-agnostic (2D+3D)')"
